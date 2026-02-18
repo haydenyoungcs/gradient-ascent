@@ -35,13 +35,12 @@ def test_accuracy(net, testloader, target_class=None):
 
 def main():
 
-    num_epochs = 5
+    num_epochs = 10
+    batch_size = 64
 
     transform = transforms.Compose(
         [transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-
-    batch_size = 4
 
     trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
                                             download=True, transform=transform)
