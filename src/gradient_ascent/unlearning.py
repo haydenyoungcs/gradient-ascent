@@ -21,13 +21,18 @@ class GAConfig:
 
 @dataclass(frozen=True)
 class SSDConfig:
-    epochs: int = 9
-    alpha: float = 1.8
-    lambda_: float = 0.09
+    epochs: int = 3
+    alpha: float = 1.0
+    lambda_: float = 1.0
     eps: float = 1e-6
-    min_scale: float = 0.65
-    excess_cap: float = 8.0
-    fisher_batches: int = 12
+    min_scale: float = 0.1
+    fisher_batches: int = 100
+    refresh_fisher_each_epoch: bool = True
+    recovery_epochs: int = 1
+    recovery_lr: float = 5e-4
+    recovery_momentum: float = 0.9
+    recovery_weight_decay: float = 1e-4
+    recovery_max_batches_per_epoch: Optional[int] = 20
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,136 @@ def estimate_empirical_fisher_diag(
     for name in fisher:
         fisher[name] /= float(n_batches)
     return fisher
+
+
+def _loader_dataset_size(loader) -> int:
+    dataset = getattr(loader, "dataset", None)
+    if dataset is None:
+        raise AttributeError("Loader must expose a dataset.")
+    return len(dataset)
+
+
+def _combine_fishers(
+    fisher_forget: Dict[str, torch.Tensor],
+    fisher_retain: Dict[str, torch.Tensor],
+    forget_weight: float,
+    retain_weight: float,
+) -> Dict[str, torch.Tensor]:
+    return {
+        name: forget_weight * fisher_forget[name] + retain_weight * fisher_retain[name]
+        for name in fisher_forget
+    }
+
+
+def _estimate_ssd_fishers(
+    model: nn.Module,
+    forget_loader,
+    retain_loader,
+    criterion: nn.Module,
+    device: torch.device,
+    fisher_batches: int,
+) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    max_forget_batches = min(fisher_batches, len(forget_loader))
+    max_retain_batches = min(fisher_batches, len(retain_loader))
+    fisher_forget = estimate_empirical_fisher_diag(model, forget_loader, criterion, device, max_forget_batches)
+    fisher_retain = estimate_empirical_fisher_diag(model, retain_loader, criterion, device, max_retain_batches)
+
+    forget_size = _loader_dataset_size(forget_loader)
+    retain_size = _loader_dataset_size(retain_loader)
+    total_size = forget_size + retain_size
+    fisher_full = _combine_fishers(
+        fisher_forget,
+        fisher_retain,
+        forget_weight=float(forget_size) / float(total_size),
+        retain_weight=float(retain_size) / float(total_size),
+    )
+    return fisher_forget, fisher_full
+
+
+def _apply_ssd_dampening(
+    model: nn.Module,
+    fisher_forget: Dict[str, torch.Tensor],
+    fisher_full: Dict[str, torch.Tensor],
+    config: SSDConfig,
+) -> Dict[str, float]:
+    total_params = 0
+    changed_params = 0
+    mean_damp_sum = 0.0
+    mean_ratio_sum = 0.0
+    n_tensors = 0
+
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            ratio = fisher_forget[name] / (fisher_full[name] + config.eps)
+            selected = ratio > config.alpha
+            beta = torch.ones_like(param)
+            beta[selected] = torch.clamp(
+                config.lambda_ * fisher_full[name][selected] / (fisher_forget[name][selected] + config.eps),
+                min=config.min_scale,
+                max=1.0,
+            )
+            param.mul_(beta)
+
+            total_params += beta.numel()
+            changed_params += int(selected.sum().item())
+            mean_damp_sum += float(beta.mean().item())
+            mean_ratio_sum += float(ratio.mean().item())
+            n_tensors += 1
+
+    if n_tensors == 0:
+        return {"mean_damp": 1.0, "selected_fraction": 0.0, "mean_ratio": 0.0}
+    return {
+        "mean_damp": mean_damp_sum / float(n_tensors),
+        "selected_fraction": changed_params / float(total_params) if total_params else 0.0,
+        "mean_ratio": mean_ratio_sum / float(n_tensors),
+    }
+
+
+def _run_ssd_recovery(
+    model: nn.Module,
+    retain_loader,
+    device: torch.device,
+    config: SSDConfig,
+) -> None:
+    if config.recovery_epochs <= 0:
+        return
+
+    amp = build_amp_config(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=config.recovery_lr,
+        momentum=config.recovery_momentum,
+        weight_decay=config.recovery_weight_decay,
+    )
+    scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
+
+    for _ in range(config.recovery_epochs):
+        model.train()
+        for batch_idx, (inputs, labels) in enumerate(retain_loader):
+            if (
+                config.recovery_max_batches_per_epoch is not None
+                and batch_idx >= config.recovery_max_batches_per_epoch
+            ):
+                break
+
+            inputs = inputs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+
+            with torch.autocast(device_type="cuda", dtype=amp.dtype, enabled=amp.enabled):
+                logits = model(inputs)
+                loss = criterion(logits, labels)
+
+            if amp.use_grad_scaler:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
 
 def estimate_salun_importance(
@@ -193,9 +328,6 @@ def run_ssd_unlearning(
 ):
     config = config or SSDConfig()
     criterion = nn.CrossEntropyLoss()
-    max_fisher_batches = min(config.fisher_batches, len(forget_loader), len(retain_loader))
-    fisher_forget = estimate_empirical_fisher_diag(model, forget_loader, criterion, device, max_fisher_batches)
-    fisher_retain = estimate_empirical_fisher_diag(model, retain_loader, criterion, device, max_fisher_batches)
 
     history: List[np.ndarray] = []
     snapshot_paths: List[str] = []
@@ -206,23 +338,39 @@ def run_ssd_unlearning(
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
 
-    step_lambda = config.lambda_ / float(config.epochs)
+    fisher_forget, fisher_full = _estimate_ssd_fishers(
+        model,
+        forget_loader,
+        retain_loader,
+        criterion,
+        device,
+        config.fisher_batches,
+    )
+
     for epoch in range(1, config.epochs + 1):
-        with torch.no_grad():
-            for name, param in model.named_parameters():
-                if not param.requires_grad:
-                    continue
-                ratio = fisher_forget[name] / (fisher_retain[name] + config.eps)
-                excess = torch.clamp(torch.relu(ratio - config.alpha), max=config.excess_cap)
-                damp = 1.0 - step_lambda * excess
-                damp = torch.clamp(damp, min=config.min_scale, max=1.0)
-                param.mul_(damp)
+        if epoch > 1 and config.refresh_fisher_each_epoch:
+            fisher_forget, fisher_full = _estimate_ssd_fishers(
+                model,
+                forget_loader,
+                retain_loader,
+                criterion,
+                device,
+                config.fisher_batches,
+            )
+        _apply_ssd_dampening(model, fisher_forget, fisher_full, config)
 
         _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
         history.append(per_class)
         path = _save_snapshot(model, snapshot_dir, epoch)
         if path is not None:
             snapshot_paths.append(path)
+
+    _run_ssd_recovery(model, retain_loader, device, config)
+    _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
+    history.append(per_class)
+    path = _save_snapshot(model, snapshot_dir, config.epochs + 1)
+    if path is not None:
+        snapshot_paths.append(path)
 
     return {"model": model, "classwise_history": history, "snapshot_paths": snapshot_paths}
 
