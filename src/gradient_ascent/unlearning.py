@@ -21,11 +21,30 @@ class GAConfig:
     retain set is consulted. This is the definition used in e.g. Thudi et al.
     (2022) and the NegGrad baseline of Golatkar et al. (2020); there is no
     regularisation, no retain-side loss and no masking.
+
+    ``freeze_bn`` keeps every BatchNorm layer in eval mode throughout GA so
+    ``running_mean`` / ``running_var`` are not EMA-updated from forget-only
+    batches. With PyTorch's default BN momentum 0.1 and O(10²) steps on a
+    single-class forget set the original buffers would otherwise be
+    essentially overwritten by forget-class statistics, and subsequent
+    ``evaluate()`` calls (which use eval-mode BN) would then read corrupted
+    stats on *every* class. Weights still receive gradient updates — only the
+    running buffers are frozen — so this is a measurement fix, not a change
+    to the GA update rule itself.
+
+    ``grad_clip_norm`` bounds the per-step update. Vanilla ``-CE`` is
+    unbounded above, so once the model mis-classifies the forget class
+    confidently the gradient norm grows without limit and GA diverges. A
+    global L2 clip preserves the gradient ascent direction while preventing
+    runaway steps; set to ``None`` to recover the unclipped Thudi et al.
+    update.
     """
 
     lr: float = 3e-6
     epochs: int = 10
     max_batches_per_epoch: Optional[int] = 6
+    freeze_bn: bool = True
+    grad_clip_norm: Optional[float] = 1.0
 
 
 @dataclass(frozen=True)
@@ -117,6 +136,18 @@ def _infinite_loader(loader):
     while True:
         for batch in loader:
             yield batch
+
+
+def _set_bn_eval(model: nn.Module) -> None:
+    """Put every BatchNorm layer into eval mode without touching other modules.
+
+    Called after ``model.train()`` so that weights still receive gradient
+    updates but BN ``running_mean`` / ``running_var`` are not EMA-updated
+    from the current batch.
+    """
+    for module in model.modules():
+        if isinstance(module, nn.modules.batchnorm._BatchNorm):
+            module.eval()
 
 
 def estimate_empirical_fisher_diag(
@@ -353,6 +384,8 @@ def run_ga_unlearning(
 
     for epoch in range(1, config.epochs + 1):
         model.train()
+        if config.freeze_bn:
+            _set_bn_eval(model)
         for batch_idx, (inputs, labels) in enumerate(forget_loader):
             if config.max_batches_per_epoch is not None and batch_idx >= config.max_batches_per_epoch:
                 break
@@ -366,10 +399,22 @@ def run_ga_unlearning(
 
             if amp.use_grad_scaler:
                 scaler.scale(-loss).backward()
+                # Unscale before clipping so the clip threshold is in real-grad
+                # units; scaler.step will then skip the unscale it would
+                # otherwise perform internally.
+                if config.grad_clip_norm is not None:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=config.grad_clip_norm
+                    )
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 (-loss).backward()
+                if config.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=config.grad_clip_norm
+                    )
                 optimizer.step()
 
         _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
