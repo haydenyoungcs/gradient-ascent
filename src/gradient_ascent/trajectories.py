@@ -86,7 +86,7 @@ def save_similarity_animation(
         ax_anim.set_xticks(x)
         ax_anim.set_xticklabels(metric_names, rotation=20)
         ax_anim.set_title(
-            f"{algorithm_key.upper()}: Unlearned_t vs {ref_label} (epoch={epoch_num})\n"
+            f"{algorithm_key.upper()}: Unlearned_t vs {ref_label} (step={epoch_num})\n"
             "(all metrics scaled to higher = more similar)"
         )
         ax_anim.set_xlabel("Metric")
@@ -165,7 +165,7 @@ def save_combined_similarity_mia_plot(
             )
 
         ax.set_title(title)
-        ax.set_xlabel("Unlearning epoch")
+        ax.set_xlabel("Unlearning step")
         ax.set_ylabel("Mean across layers" if metric_group == "similarity" else "Attack metric")
         ax.grid(alpha=0.3)
 

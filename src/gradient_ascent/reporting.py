@@ -64,7 +64,7 @@ def save_metric_summary_plot(
         ax.plot(epochs, series[metric_name], marker="o", label=metric_name)
 
     ax.set_title(title)
-    ax.set_xlabel("Unlearning epoch")
+    ax.set_xlabel("Unlearning step")
     ax.set_ylabel("Similarity (mean across layers)")
     ax.grid(alpha=0.3)
     ax.legend(ncol=3)
@@ -128,7 +128,7 @@ def save_classwise_percent_change_plot(
     for class_idx, class_name in enumerate(class_names):
         ax.plot(epochs, percent_change[:, class_idx], label=class_name)
 
-    ax.set_xlabel("Unlearning epoch")
+    ax.set_xlabel("Unlearning step")
     ax.set_ylabel("Accuracy change (%)")
     ax.set_title(title)
     ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
@@ -152,7 +152,7 @@ def save_classwise_absolute_accuracy_plot(
     for class_idx, class_name in enumerate(class_names):
         ax.plot(epochs, history[:, class_idx], label=class_name)
 
-    ax.set_xlabel("Unlearning epoch")
+    ax.set_xlabel("Unlearning step")
     ax.set_ylabel("Class accuracy (%)")
     ax.set_title(title)
     ax.set_ylim(0, 100)
@@ -207,7 +207,7 @@ def save_mia_metric_grid_plot(
         if metric_key in baseline:
             ax.axhline(baseline[metric_key], linestyle="--", linewidth=1.8, color="black", label="Retrained baseline")
         ax.set_title(metric_label)
-        ax.set_xlabel("Unlearning epoch")
+        ax.set_xlabel("Unlearning step")
         ax.set_ylabel("Attack metric")
         ax.grid(alpha=0.3)
 
@@ -244,7 +244,7 @@ def save_mia_control_comparison_plot(
         label=f"Retain (class={retain_control_label})",
     )
     ax.set_title(f"{algorithm_label} MIA control comparison (lower = less inferable)")
-    ax.set_xlabel("Unlearning epoch")
+    ax.set_xlabel("Unlearning step")
     ax.set_ylabel("LogReg mean member probability")
     ax.grid(alpha=0.3)
     ax.legend()

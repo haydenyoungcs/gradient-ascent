@@ -23,7 +23,7 @@ class GAConfig:
     regularisation, no retain-side loss and no masking.
     """
 
-    lr: float = 7e-6
+    lr: float = 5e-6
     epochs: int = 10
     max_batches_per_epoch: Optional[int] = 6
 
@@ -33,18 +33,33 @@ class SSDConfig:
     """Selective Synaptic Dampening (Foster, Schoepf & Brintrup, 2023).
 
     One-shot post-hoc dampening: for each parameter θ_i whose forget-set Fisher
-    dominates the full-set Fisher (``I_forget(θ_i) > α · I_full(θ_i)``), apply
-    ``θ_i ← β_i · θ_i`` with ``β_i = min(1, λ · I_full(θ_i) / I_forget(θ_i))``.
-    The paper performs this once — there is no fine-tuning step afterwards.
-    ``epochs`` is kept as a parameter only so snapshots can be taken before and
-    after the dampening for downstream trajectory plots; the algorithm itself
-    is a single pass.
+    dominates the reference Fisher (``I_forget(θ_i) > α · I_ref(θ_i)``), apply
+    ``θ_i ← β_i · θ_i`` with ``β_i = min(1, λ · I_ref(θ_i) / I_forget(θ_i))``.
+    The paper performs this once — there is no fine-tuning step afterwards, so
+    the returned trajectory contains exactly two steps (pre- and post-
+    dampening).
+
+    ``selection_basis`` chooses what ``I_ref`` is:
+
+    * ``"retain"`` (default) computes the reference Fisher on ``D_r`` only.
+      This is the canonical interpretation of "weights that are
+      disproportionately important for the forget set vs. everything else we
+      want to keep" and, crucially, makes ``alpha`` interpretable independently
+      of the forget ratio. With the convex-combination form below, the
+      selection condition ``I_f > α · (p I_f + (1-p) I_r)`` reduces to
+      ``(1 - α p) I_f > α (1-p) I_r``; for any forget ratio ``p ≥ 1/α`` *no*
+      parameter can ever be selected, which yields a no-op SSD pass.
+    * ``"union"`` reproduces the Foster et al. reference implementation, where
+      ``I_ref`` is the per-sample Fisher over ``D = D_f ∪ D_r``. This is a
+      good approximation of ``I_retain`` when ``|D_f| ≪ |D|`` but is
+      pathological at the 10% forget ratios used here.
     """
 
-    alpha: float = 10.0
+    alpha: float = 1.0
     lambda_: float = 1.0
     eps: float = 1e-12
     fisher_batches: int = 100
+    selection_basis: str = "retain"
 
 
 @dataclass(frozen=True)
@@ -57,16 +72,23 @@ class SalUnConfig:
     restricted to ``m_S``, where ``y'_f`` is a random label distinct from the
     true forget-set label. Both the forget and retain terms are part of the
     published objective.
+
+    ``weight_decay`` defaults to 0 because PyTorch's ``SGD`` adds
+    ``weight_decay * param`` to the gradient *inside* ``step()``, i.e. after
+    we have zeroed the gradient on non-salient weights; any non-zero value
+    would therefore leak through the saliency mask and violate the
+    ``θ ← θ - η · m_S ⊙ ∇L`` update rule. Regularization, if desired, must
+    be folded into the loss explicitly.
     """
 
-    lr: float = 1e-3
+    lr: float = 1e-2
     epochs: int = 10
     mask_ratio: float = 0.5
     mask_batches: int = 10
-    max_batches_per_epoch: Optional[int] = 10
+    max_batches_per_epoch: Optional[int] = None
     num_classes: int = 10
     momentum: float = 0.9
-    weight_decay: float = 5e-4
+    weight_decay: float = 0.0
 
 
 def _save_snapshot(model: nn.Module, snapshot_dir: Optional[str], epoch: int) -> Optional[str]:
@@ -149,31 +171,46 @@ def _estimate_ssd_fishers(
     criterion: nn.Module,
     device: torch.device,
     fisher_batches: int,
+    selection_basis: str = "retain",
 ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """Return ``(I_forget, I_ref)`` where ``I_ref`` is the reference Fisher.
+
+    See :class:`SSDConfig` for what ``selection_basis`` controls.
+    """
     max_forget_batches = min(fisher_batches, len(forget_loader))
     max_retain_batches = min(fisher_batches, len(retain_loader))
     fisher_forget = estimate_empirical_fisher_diag(model, forget_loader, criterion, device, max_forget_batches)
     fisher_retain = estimate_empirical_fisher_diag(model, retain_loader, criterion, device, max_retain_batches)
 
-    forget_size = _loader_dataset_size(forget_loader)
-    retain_size = _loader_dataset_size(retain_loader)
-    total_size = forget_size + retain_size
-    fisher_full = _combine_fishers(
-        fisher_forget,
-        fisher_retain,
-        forget_weight=float(forget_size) / float(total_size),
-        retain_weight=float(retain_size) / float(total_size),
+    if selection_basis == "retain":
+        return fisher_forget, fisher_retain
+    if selection_basis == "union":
+        forget_size = _loader_dataset_size(forget_loader)
+        retain_size = _loader_dataset_size(retain_loader)
+        total_size = forget_size + retain_size
+        fisher_full = _combine_fishers(
+            fisher_forget,
+            fisher_retain,
+            forget_weight=float(forget_size) / float(total_size),
+            retain_weight=float(retain_size) / float(total_size),
+        )
+        return fisher_forget, fisher_full
+    raise ValueError(
+        f"Unknown SSD selection_basis '{selection_basis}'; expected 'retain' or 'union'."
     )
-    return fisher_forget, fisher_full
 
 
 def _apply_ssd_dampening(
     model: nn.Module,
     fisher_forget: Dict[str, torch.Tensor],
-    fisher_full: Dict[str, torch.Tensor],
+    fisher_ref: Dict[str, torch.Tensor],
     config: SSDConfig,
 ) -> Dict[str, float]:
-    """Apply the SSD selection-and-dampening rule from Foster et al. (2023)."""
+    """Apply the SSD selection-and-dampening rule from Foster et al. (2023).
+
+    Selection: ``I_forget(θ_i) > α · I_ref(θ_i)``.
+    Update:    ``θ_i ← min(1, λ · I_ref(θ_i) / I_forget(θ_i)) · θ_i`` on selected.
+    """
     total_params = 0
     changed_params = 0
     mean_damp_sum = 0.0
@@ -185,18 +222,18 @@ def _apply_ssd_dampening(
             if not param.requires_grad:
                 continue
             ff = fisher_forget[name]
-            fu = fisher_full[name]
-            selected = ff > config.alpha * fu
+            fr = fisher_ref[name]
+            selected = ff > config.alpha * fr
             beta = torch.ones_like(param)
             if selected.any():
-                scale = config.lambda_ * fu[selected] / (ff[selected] + config.eps)
+                scale = config.lambda_ * fr[selected] / (ff[selected] + config.eps)
                 beta[selected] = torch.clamp(scale, max=1.0)
             param.mul_(beta)
 
             total_params += beta.numel()
             changed_params += int(selected.sum().item())
             mean_damp_sum += float(beta.mean().item())
-            ratio = ff / (fu + config.eps)
+            ratio = ff / (fr + config.eps)
             mean_ratio_sum += float(ratio.mean().item())
             n_tensors += 1
 
@@ -357,15 +394,16 @@ def run_ssd_unlearning(
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
 
-    fisher_forget, fisher_full = _estimate_ssd_fishers(
+    fisher_forget, fisher_ref = _estimate_ssd_fishers(
         model,
         forget_loader,
         retain_loader,
         criterion,
         device,
         config.fisher_batches,
+        selection_basis=config.selection_basis,
     )
-    _apply_ssd_dampening(model, fisher_forget, fisher_full, config)
+    _apply_ssd_dampening(model, fisher_forget, fisher_ref, config)
 
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
@@ -398,11 +436,16 @@ def run_salun_unlearning(
 
     amp = build_amp_config(device)
     criterion = nn.CrossEntropyLoss()
+    # Weight decay is deliberately applied *inside* the loss (below) rather
+    # than via the optimizer, so its contribution to the gradient is also
+    # restricted to the saliency mask. Passing weight_decay to torch's SGD
+    # would add wd*param *after* we mask the gradient and therefore leak an
+    # update onto non-salient weights.
     optimizer = optim.SGD(
         model.parameters(),
         lr=config.lr,
         momentum=config.momentum,
-        weight_decay=config.weight_decay,
+        weight_decay=0.0,
     )
     scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
 
@@ -413,6 +456,9 @@ def run_salun_unlearning(
     )
 
     retain_iter = _infinite_loader(retain_loader)
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    wd = float(config.weight_decay)
 
     rng = torch.Generator(device=device)
     rng.manual_seed(int(torch.initial_seed()) & 0xFFFFFFFF)
@@ -445,6 +491,9 @@ def run_salun_unlearning(
                 f_logits = model(f_inputs)
                 r_logits = model(r_inputs)
                 loss = criterion(f_logits, random_labels) + criterion(r_logits, r_labels)
+                if wd > 0.0:
+                    l2 = sum((p * p).sum() for p in trainable_params)
+                    loss = loss + 0.5 * wd * l2
 
             if amp.use_grad_scaler:
                 scaler.scale(loss).backward()

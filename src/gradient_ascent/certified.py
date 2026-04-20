@@ -19,8 +19,9 @@ regression head. The head is then subjected to the certified-removal recipe:
    or calibrated from ``epsilon``, ``delta`` and a bound on the residual
    gradient norm.
 
-The pre- and post-removal states are saved as epoch 0 and epoch 1 snapshots so
-the same plotting pipeline used for GA / SSD / SalUn applies unchanged.
+Three snapshots are produced (step 0 = loaded model, step 1 = post-refit, step
+2 = post Newton update) so the plotting pipeline used for GA / SSD / SalUn
+applies unchanged.
 """
 
 from __future__ import annotations

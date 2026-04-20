@@ -417,7 +417,7 @@ def run_trajectory_analysis(
             save_metric_summary_plot(
                 epoch_rows,
                 summary_plot_path,
-                f"{algorithm_key.upper()} vs {reference_key.capitalize()} over unlearning epochs "
+                f"{algorithm_key.upper()} vs {reference_key.capitalize()} over unlearning steps "
                 "(all metrics scaled to higher = more similar)",
                 metric_names,
                 lower_better_metrics,
