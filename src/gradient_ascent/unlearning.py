@@ -14,6 +14,15 @@ from .training import build_amp_config, evaluate
 
 @dataclass(frozen=True)
 class GAConfig:
+    """Pure gradient ascent on the forget set.
+
+    Implements vanilla Gradient Ascent unlearning: a single SGD loop over the
+    forget loader where each step moves against the cross-entropy gradient. No
+    retain set is consulted. This is the definition used in e.g. Thudi et al.
+    (2022) and the NegGrad baseline of Golatkar et al. (2020); there is no
+    regularisation, no retain-side loss and no masking.
+    """
+
     lr: float = 7e-6
     epochs: int = 10
     max_batches_per_epoch: Optional[int] = 6
@@ -21,27 +30,43 @@ class GAConfig:
 
 @dataclass(frozen=True)
 class SSDConfig:
-    epochs: int = 3
-    alpha: float = 1.0
+    """Selective Synaptic Dampening (Foster, Schoepf & Brintrup, 2023).
+
+    One-shot post-hoc dampening: for each parameter θ_i whose forget-set Fisher
+    dominates the full-set Fisher (``I_forget(θ_i) > α · I_full(θ_i)``), apply
+    ``θ_i ← β_i · θ_i`` with ``β_i = min(1, λ · I_full(θ_i) / I_forget(θ_i))``.
+    The paper performs this once — there is no fine-tuning step afterwards.
+    ``epochs`` is kept as a parameter only so snapshots can be taken before and
+    after the dampening for downstream trajectory plots; the algorithm itself
+    is a single pass.
+    """
+
+    alpha: float = 10.0
     lambda_: float = 1.0
-    eps: float = 1e-6
-    min_scale: float = 0.1
+    eps: float = 1e-12
     fisher_batches: int = 100
-    refresh_fisher_each_epoch: bool = True
-    recovery_epochs: int = 1
-    recovery_lr: float = 5e-4
-    recovery_momentum: float = 0.9
-    recovery_weight_decay: float = 1e-4
-    recovery_max_batches_per_epoch: Optional[int] = 20
 
 
 @dataclass(frozen=True)
 class SalUnConfig:
-    lr: float = 4e-6
+    """SalUn: saliency-masked random-labeling unlearning (Fan et al., 2024).
+
+    Matches Algorithm 1 of the paper: compute the weight-saliency mask ``m_S``
+    from the forget-set gradient magnitudes at the pre-unlearning checkpoint,
+    then minimise ``CE(f_θ(x_f), y'_f) + CE(f_θ(x_r), y_r)`` with gradients
+    restricted to ``m_S``, where ``y'_f`` is a random label distinct from the
+    true forget-set label. Both the forget and retain terms are part of the
+    published objective.
+    """
+
+    lr: float = 1e-3
     epochs: int = 10
-    mask_ratio: float = 0.02
-    mask_batches: int = 5
-    max_batches_per_epoch: Optional[int] = 5
+    mask_ratio: float = 0.5
+    mask_batches: int = 10
+    max_batches_per_epoch: Optional[int] = 10
+    num_classes: int = 10
+    momentum: float = 0.9
+    weight_decay: float = 5e-4
 
 
 def _save_snapshot(model: nn.Module, snapshot_dir: Optional[str], epoch: int) -> Optional[str]:
@@ -51,6 +76,13 @@ def _save_snapshot(model: nn.Module, snapshot_dir: Optional[str], epoch: int) ->
     path = os.path.join(snapshot_dir, f"epoch_{epoch:03d}.pt")
     torch.save(model.state_dict(), path)
     return path
+
+
+def _infinite_loader(loader):
+    """Endless iterator used to draw retain batches inside a forget-paced loop."""
+    while True:
+        for batch in loader:
+            yield batch
 
 
 def estimate_empirical_fisher_diag(
@@ -74,7 +106,12 @@ def estimate_empirical_fisher_diag(
         model.zero_grad(set_to_none=True)
         logits = model(inputs)
         loss = criterion(logits, labels)
-        grads = torch.autograd.grad(loss, [param for _, param in params_named], retain_graph=False, create_graph=False)
+        grads = torch.autograd.grad(
+            loss,
+            [param for _, param in params_named],
+            retain_graph=False,
+            create_graph=False,
+        )
         for (name, _), grad in zip(params_named, grads):
             fisher[name] += grad.detach() ** 2
         n_batches += 1
@@ -136,6 +173,7 @@ def _apply_ssd_dampening(
     fisher_full: Dict[str, torch.Tensor],
     config: SSDConfig,
 ) -> Dict[str, float]:
+    """Apply the SSD selection-and-dampening rule from Foster et al. (2023)."""
     total_params = 0
     changed_params = 0
     mean_damp_sum = 0.0
@@ -146,19 +184,19 @@ def _apply_ssd_dampening(
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            ratio = fisher_forget[name] / (fisher_full[name] + config.eps)
-            selected = ratio > config.alpha
+            ff = fisher_forget[name]
+            fu = fisher_full[name]
+            selected = ff > config.alpha * fu
             beta = torch.ones_like(param)
-            beta[selected] = torch.clamp(
-                config.lambda_ * fisher_full[name][selected] / (fisher_forget[name][selected] + config.eps),
-                min=config.min_scale,
-                max=1.0,
-            )
+            if selected.any():
+                scale = config.lambda_ * fu[selected] / (ff[selected] + config.eps)
+                beta[selected] = torch.clamp(scale, max=1.0)
             param.mul_(beta)
 
             total_params += beta.numel()
             changed_params += int(selected.sum().item())
             mean_damp_sum += float(beta.mean().item())
+            ratio = ff / (fu + config.eps)
             mean_ratio_sum += float(ratio.mean().item())
             n_tensors += 1
 
@@ -171,51 +209,6 @@ def _apply_ssd_dampening(
     }
 
 
-def _run_ssd_recovery(
-    model: nn.Module,
-    retain_loader,
-    device: torch.device,
-    config: SSDConfig,
-) -> None:
-    if config.recovery_epochs <= 0:
-        return
-
-    amp = build_amp_config(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(
-        model.parameters(),
-        lr=config.recovery_lr,
-        momentum=config.recovery_momentum,
-        weight_decay=config.recovery_weight_decay,
-    )
-    scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
-
-    for _ in range(config.recovery_epochs):
-        model.train()
-        for batch_idx, (inputs, labels) in enumerate(retain_loader):
-            if (
-                config.recovery_max_batches_per_epoch is not None
-                and batch_idx >= config.recovery_max_batches_per_epoch
-            ):
-                break
-
-            inputs = inputs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
-
-            with torch.autocast(device_type="cuda", dtype=amp.dtype, enabled=amp.enabled):
-                logits = model(inputs)
-                loss = criterion(logits, labels)
-
-            if amp.use_grad_scaler:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
-
-
 def estimate_salun_importance(
     model: nn.Module,
     loader,
@@ -223,6 +216,7 @@ def estimate_salun_importance(
     device: torch.device,
     max_batches: int,
 ) -> Dict[str, torch.Tensor]:
+    """Accumulate |∇_θ L(x, y; θ_o)| over the forget set for saliency scoring."""
     amp = build_amp_config(device)
     params_named = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
     importance = {name: torch.zeros_like(param, device=device) for name, param in params_named}
@@ -240,7 +234,12 @@ def estimate_salun_importance(
             logits = model(inputs)
             loss = criterion(logits, labels)
 
-        grads = torch.autograd.grad(loss, [param for _, param in params_named], retain_graph=False, create_graph=False)
+        grads = torch.autograd.grad(
+            loss,
+            [param for _, param in params_named],
+            retain_graph=False,
+            create_graph=False,
+        )
         for (name, _), grad in zip(params_named, grads):
             importance[name] += grad.detach().abs()
         n_batches += 1
@@ -262,6 +261,18 @@ def build_salun_mask(importance: Dict[str, torch.Tensor], mask_ratio: float) -> 
     return {name: (vals >= threshold).to(vals.dtype) for name, vals in importance.items()}
 
 
+def _random_wrong_labels(labels: torch.Tensor, num_classes: int, generator: torch.Generator) -> torch.Tensor:
+    """Sample a label in ``[0, num_classes)`` distinct from each ``labels[i]``."""
+    offsets = torch.randint(
+        1,
+        num_classes,
+        labels.shape,
+        device=labels.device,
+        generator=generator,
+    )
+    return (labels + offsets) % num_classes
+
+
 def run_ga_unlearning(
     model: nn.Module,
     forget_loader,
@@ -271,6 +282,7 @@ def run_ga_unlearning(
     num_classes: int = 10,
     snapshot_dir: Optional[str] = None,
 ):
+    """Vanilla Gradient Ascent unlearning on the forget set only."""
     config = config or GAConfig()
     amp = build_amp_config(device)
     criterion = nn.CrossEntropyLoss()
@@ -296,8 +308,8 @@ def run_ga_unlearning(
             optimizer.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type="cuda", dtype=amp.dtype, enabled=amp.enabled):
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
+                logits = model(inputs)
+                loss = criterion(logits, labels)
 
             if amp.use_grad_scaler:
                 scaler.scale(-loss).backward()
@@ -326,6 +338,13 @@ def run_ssd_unlearning(
     num_classes: int = 10,
     snapshot_dir: Optional[str] = None,
 ):
+    """One-shot Selective Synaptic Dampening as specified in Foster et al. (2023).
+
+    The returned ``classwise_history`` always contains exactly two entries —
+    the model before dampening and the model after dampening — because SSD is
+    a single algebraic intervention on the weights rather than an iterative
+    procedure.
+    """
     config = config or SSDConfig()
     criterion = nn.CrossEntropyLoss()
 
@@ -346,29 +365,11 @@ def run_ssd_unlearning(
         device,
         config.fisher_batches,
     )
+    _apply_ssd_dampening(model, fisher_forget, fisher_full, config)
 
-    for epoch in range(1, config.epochs + 1):
-        if epoch > 1 and config.refresh_fisher_each_epoch:
-            fisher_forget, fisher_full = _estimate_ssd_fishers(
-                model,
-                forget_loader,
-                retain_loader,
-                criterion,
-                device,
-                config.fisher_batches,
-            )
-        _apply_ssd_dampening(model, fisher_forget, fisher_full, config)
-
-        _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
-        history.append(per_class)
-        path = _save_snapshot(model, snapshot_dir, epoch)
-        if path is not None:
-            snapshot_paths.append(path)
-
-    _run_ssd_recovery(model, retain_loader, device, config)
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
-    path = _save_snapshot(model, snapshot_dir, config.epochs + 1)
+    path = _save_snapshot(model, snapshot_dir, 1)
     if path is not None:
         snapshot_paths.append(path)
 
@@ -378,16 +379,31 @@ def run_ssd_unlearning(
 def run_salun_unlearning(
     model: nn.Module,
     forget_loader,
+    retain_loader,
     testloader,
     device: torch.device,
     config: Optional[SalUnConfig] = None,
     num_classes: int = 10,
     snapshot_dir: Optional[str] = None,
 ):
+    """SalUn unlearning per Algorithm 1 of Fan et al. (2024).
+
+    1. Build weight saliency mask from forget-set gradient magnitudes at θ_o.
+    2. For each epoch, minimise ``CE(f_θ(x_f), y'_f) + CE(f_θ(x_r), y_r)`` with
+       ``y'_f`` random wrong labels, masking gradients to the salient weights.
+    """
     config = config or SalUnConfig()
+    if retain_loader is None:
+        raise ValueError("SalUn requires a retain_loader; see Fan et al. (2024) Algorithm 1.")
+
     amp = build_amp_config(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=0.0)
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=config.lr,
+        momentum=config.momentum,
+        weight_decay=config.weight_decay,
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
 
     max_mask_batches = min(config.mask_batches, len(forget_loader))
@@ -395,6 +411,11 @@ def run_salun_unlearning(
         estimate_salun_importance(model, forget_loader, criterion, device, max_mask_batches),
         config.mask_ratio,
     )
+
+    retain_iter = _infinite_loader(retain_loader)
+
+    rng = torch.Generator(device=device)
+    rng.manual_seed(int(torch.initial_seed()) & 0xFFFFFFFF)
 
     history: List[np.ndarray] = []
     snapshot_paths: List[str] = []
@@ -407,22 +428,29 @@ def run_salun_unlearning(
 
     for epoch in range(1, config.epochs + 1):
         model.train()
-        for batch_idx, (inputs, labels) in enumerate(forget_loader):
+        for batch_idx, (f_inputs, f_labels) in enumerate(forget_loader):
             if config.max_batches_per_epoch is not None and batch_idx >= config.max_batches_per_epoch:
                 break
-            inputs = inputs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+            f_inputs = f_inputs.to(device, non_blocking=True)
+            f_labels = f_labels.to(device, non_blocking=True)
+            random_labels = _random_wrong_labels(f_labels, config.num_classes, rng)
+
+            r_inputs, r_labels = next(retain_iter)
+            r_inputs = r_inputs.to(device, non_blocking=True)
+            r_labels = r_labels.to(device, non_blocking=True)
+
             optimizer.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type="cuda", dtype=amp.dtype, enabled=amp.enabled):
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
+                f_logits = model(f_inputs)
+                r_logits = model(r_inputs)
+                loss = criterion(f_logits, random_labels) + criterion(r_logits, r_labels)
 
             if amp.use_grad_scaler:
-                scaler.scale(-loss).backward()
+                scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
             else:
-                (-loss).backward()
+                loss.backward()
 
             for name, param in model.named_parameters():
                 if param.grad is None or name not in salun_mask:
@@ -504,6 +532,7 @@ def run_salun_snapshots(
     model_factory: Callable[[], nn.Module],
     original_checkpoint_path: str,
     forget_loader,
+    retain_loader,
     testloader,
     device: torch.device,
     snapshot_dir: str,
@@ -516,6 +545,7 @@ def run_salun_snapshots(
     result = run_salun_unlearning(
         model,
         forget_loader,
+        retain_loader,
         testloader,
         device,
         config=config,

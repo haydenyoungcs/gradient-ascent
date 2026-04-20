@@ -23,6 +23,7 @@ from .reporting import (
     save_mia_trajectory_csv,
     save_similarity_trajectory_csv,
 )
+from .certified import CertifiedConfig, run_certified_unlearning
 from .trajectories import compute_epoch_rows_from_snapshots, save_combined_similarity_mia_plot, save_similarity_animation
 from .training import evaluate, train_model
 from .unlearning import GAConfig, SSDConfig, SalUnConfig, run_ga_unlearning, run_salun_unlearning, run_ssd_unlearning
@@ -43,6 +44,7 @@ class CoreExperimentConfig:
     ga_config: GAConfig = field(default_factory=GAConfig)
     ssd_config: SSDConfig = field(default_factory=SSDConfig)
     salun_config: SalUnConfig = field(default_factory=SalUnConfig)
+    certified_config: CertifiedConfig = field(default_factory=CertifiedConfig)
 
 
 @dataclass(frozen=True)
@@ -99,12 +101,13 @@ class TrajectoryExperimentArtifacts:
 @dataclass(frozen=True)
 class CombinedComparisonConfig:
     out_dir: str = "out"
-    algo_keys: Sequence[str] = ("ga", "ssd", "salun")
+    algo_keys: Sequence[str] = ("ga", "ssd", "salun", "certified")
     algo_display: Mapping[str, str] = field(
         default_factory=lambda: {
             "ga": "Gradient Ascent (GA)",
             "ssd": "Selective Synaptic Dampening (SSD)",
             "salun": "SalUn",
+            "certified": "Certified Removal",
         }
     )
     reference_key: str = "retrained"
@@ -283,6 +286,7 @@ def run_core_checkpoints(
     salun_result = run_salun_unlearning(
         salun_model,
         forget_loader,
+        retain_loader,
         testloader,
         device,
         config=config.salun_config,
@@ -291,10 +295,30 @@ def run_core_checkpoints(
     )
     torch.save(salun_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_salun.pt")
 
+    certified_model = model_factory()
+    certified_model.load_state_dict(torch.load(original_path, map_location=device))
+    certified_result = run_certified_unlearning(
+        certified_model,
+        forget_loader,
+        retain_loader,
+        testloader,
+        device,
+        config=config.certified_config,
+        num_classes=config.num_classes,
+        snapshot_dir=f"{config.out_dir}/unlearning_snapshots_certified",
+    )
+    torch.save(certified_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_certified.pt")
+
     algorithm_artifacts = {
         "ga": _save_classwise_artifacts("ga", "GA", ga_result["classwise_history"], config),
         "ssd": _save_classwise_artifacts("ssd", "SSD", ssd_result["classwise_history"], config),
         "salun": _save_classwise_artifacts("salun", "SalUn", salun_result["classwise_history"], config),
+        "certified": _save_classwise_artifacts(
+            "certified",
+            "Certified",
+            certified_result["classwise_history"],
+            config,
+        ),
     }
     for algorithm_key, artifact in algorithm_artifacts.items():
         _log_media(wandb_run, wandb_module, f"plots/classwise_percent_change_{algorithm_key}", artifact.classwise_percent_plot_path)
