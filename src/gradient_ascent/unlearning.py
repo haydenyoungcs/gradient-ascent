@@ -23,7 +23,7 @@ class GAConfig:
     regularisation, no retain-side loss and no masking.
     """
 
-    lr: float = 5e-6
+    lr: float = 3e-6
     epochs: int = 10
     max_batches_per_epoch: Optional[int] = 6
 
@@ -55,7 +55,7 @@ class SSDConfig:
       pathological at the 10% forget ratios used here.
     """
 
-    alpha: float = 1.0
+    alpha: float = 10.0
     lambda_: float = 1.0
     eps: float = 1e-12
     fisher_batches: int = 100
@@ -79,16 +79,28 @@ class SalUnConfig:
     would therefore leak through the saliency mask and violate the
     ``θ ← θ - η · m_S ⊙ ∇L`` update rule. Regularization, if desired, must
     be folded into the loss explicitly.
+
+    ``retain_weight`` (β) scales the retain-side cross-entropy term:
+    ``L = CE(f_θ(x_f), y'_f) + β · CE(f_θ(x_r), y_r)``. Algorithm 1 in the
+    paper assumes joint sampling from ``D_f ∪ D_r`` so the per-step ratio of
+    forget to retain examples matches their dataset proportions. Our loop
+    iterates the forget loader as the outer loop and draws one retain batch
+    per forget batch (1:1), which over-weights the random-label term by a
+    factor of ``|D_r|/|D_f|`` relative to the joint-sampling regime. Setting
+    ``retain_weight=None`` (default) lets ``run_salun_unlearning`` measure
+    that ratio at runtime and apply it as ``β``; pass an explicit float to
+    override (use ``1.0`` to recover the literal Algorithm 1 schedule).
     """
 
-    lr: float = 1e-2
-    epochs: int = 10
+    lr: float = 5e-3
+    epochs: int = 5
     mask_ratio: float = 0.5
     mask_batches: int = 10
     max_batches_per_epoch: Optional[int] = None
     num_classes: int = 10
     momentum: float = 0.9
     weight_decay: float = 0.0
+    retain_weight: Optional[float] = None
 
 
 def _save_snapshot(model: nn.Module, snapshot_dir: Optional[str], epoch: int) -> Optional[str]:
@@ -258,7 +270,11 @@ def estimate_salun_importance(
     params_named = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
     importance = {name: torch.zeros_like(param, device=device) for name, param in params_named}
 
-    model.train()
+    # IMPORTANT: must be eval() — train() would EMA-update every BatchNorm
+    # layer's running_mean / running_var with statistics from forget-only
+    # batches, silently corrupting BN buffers before any later evaluate()
+    # call. We only need autograd here, not BN's training-time behaviour.
+    model.eval()
     n_batches = 0
     for batch_idx, (inputs, labels) in enumerate(loader):
         if batch_idx >= max_batches:
@@ -449,6 +465,19 @@ def run_salun_unlearning(
     )
     scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
 
+    history: List[np.ndarray] = []
+    snapshot_paths: List[str] = []
+
+    # Capture the *true* pre-unlearning state first, before any operation
+    # that puts the model in train mode or could touch BN running buffers.
+    # This guarantees step-0 accuracy matches the loaded checkpoint exactly,
+    # so trajectories across algorithms share an identical starting point.
+    initial = _save_snapshot(model, snapshot_dir, 0)
+    if initial is not None:
+        snapshot_paths.append(initial)
+    _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
+    history.append(per_class)
+
     max_mask_batches = min(config.mask_batches, len(forget_loader))
     salun_mask = build_salun_mask(
         estimate_salun_importance(model, forget_loader, criterion, device, max_mask_batches),
@@ -460,17 +489,20 @@ def run_salun_unlearning(
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     wd = float(config.weight_decay)
 
+    # β balances retain-vs-forget per-step coverage. The default mirrors the
+    # joint-sampling regime of Fan et al. (2024) Algorithm 1, where the ratio
+    # of forget to retain examples per minibatch matches |D_f|:|D_r|. Our
+    # outer-forget loop draws 1 retain batch per forget batch, so we scale
+    # CE_retain by |D_r|/|D_f| to recover that balance.
+    if config.retain_weight is None:
+        forget_size = _loader_dataset_size(forget_loader)
+        retain_size = _loader_dataset_size(retain_loader)
+        retain_weight = float(retain_size) / float(max(forget_size, 1))
+    else:
+        retain_weight = float(config.retain_weight)
+
     rng = torch.Generator(device=device)
     rng.manual_seed(int(torch.initial_seed()) & 0xFFFFFFFF)
-
-    history: List[np.ndarray] = []
-    snapshot_paths: List[str] = []
-
-    initial = _save_snapshot(model, snapshot_dir, 0)
-    if initial is not None:
-        snapshot_paths.append(initial)
-    _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
-    history.append(per_class)
 
     for epoch in range(1, config.epochs + 1):
         model.train()
@@ -490,7 +522,7 @@ def run_salun_unlearning(
             with torch.autocast(device_type="cuda", dtype=amp.dtype, enabled=amp.enabled):
                 f_logits = model(f_inputs)
                 r_logits = model(r_inputs)
-                loss = criterion(f_logits, random_labels) + criterion(r_logits, r_labels)
+                loss = criterion(f_logits, random_labels) + retain_weight * criterion(r_logits, r_labels)
                 if wd > 0.0:
                     l2 = sum((p * p).sum() for p in trainable_params)
                     loss = loss + 0.5 * wd * l2
