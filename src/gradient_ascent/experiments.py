@@ -206,6 +206,7 @@ def run_core_checkpoints(
     use_cuda: bool,
     num_workers: int,
     config: Optional[CoreExperimentConfig] = None,
+    reuse_existing_checkpoints: bool = False,
     wandb_run=None,
     wandb_module=None,
 ) -> CoreExperimentArtifacts:
@@ -217,54 +218,70 @@ def run_core_checkpoints(
 
     original_path = f"{config.out_dir}/original_net.pt"
     retrained_path = f"{config.out_dir}/retrained_from_scratch_net.pt"
-
-    original_model = model_factory()
-    original_acc_history, _ = train_model(
-        original_model,
-        trainloader,
-        testloader,
-        num_epochs=config.num_epochs,
-        device=device,
-        lr=config.training_lr,
-        momentum=config.training_momentum,
-        weight_decay=config.weight_decay,
-        save_path=original_path,
-        log_prefix="original ",
-        num_classes=config.num_classes,
-        wandb_run=wandb_run,
-        wandb_prefix="original",
-        wandb_step_offset=0,
-    )
+    original_vs_retrain_plot_path = f"{config.out_dir}/original_vs_retrain_acc.png"
 
     keep_subset = subset_for_class(trainset, config.target_label, include=False)
     keep_loader = make_loader(keep_subset, config.batch_size, True, num_workers, use_cuda)
 
-    retrained_model = model_factory()
-    retrained_acc_history, _ = train_model(
-        retrained_model,
-        keep_loader,
-        testloader,
-        num_epochs=config.num_epochs,
-        device=device,
-        lr=config.training_lr,
-        momentum=config.training_momentum,
-        weight_decay=config.weight_decay,
-        save_path=retrained_path,
-        log_prefix="retrain ",
-        num_classes=config.num_classes,
-        wandb_run=wandb_run,
-        wandb_prefix="retrain",
-        wandb_step_offset=config.num_epochs,
-    )
+    original_model = model_factory()
+    loaded_original = reuse_existing_checkpoints and os.path.exists(original_path)
+    if loaded_original:
+        original_model.load_state_dict(torch.load(original_path, map_location=device))
+        original_acc, _ = evaluate(original_model, testloader, num_classes=config.num_classes, device=device)
+        original_acc_history = [original_acc]
+        print(f"Loaded existing original checkpoint from {original_path}")
+    else:
+        original_acc_history, _ = train_model(
+            original_model,
+            trainloader,
+            testloader,
+            num_epochs=config.num_epochs,
+            device=device,
+            lr=config.training_lr,
+            momentum=config.training_momentum,
+            weight_decay=config.weight_decay,
+            save_path=original_path,
+            log_prefix="original ",
+            num_classes=config.num_classes,
+            wandb_run=wandb_run,
+            wandb_prefix="original",
+            wandb_step_offset=0,
+        )
 
-    original_vs_retrain_plot_path = save_accuracy_history_plot(
-        {
-            "Original (all data)": original_acc_history,
-            "Retrained from scratch": retrained_acc_history,
-        },
-        f"{config.out_dir}/original_vs_retrain_acc.png",
-        f"Original and retrained-from-scratch test accuracy vs epoch (ResNet-{config.model_depth})",
-    )
+    retrained_model = model_factory()
+    loaded_retrained = reuse_existing_checkpoints and os.path.exists(retrained_path)
+    if loaded_retrained:
+        retrained_model.load_state_dict(torch.load(retrained_path, map_location=device))
+        retrained_acc, _ = evaluate(retrained_model, testloader, num_classes=config.num_classes, device=device)
+        retrained_acc_history = [retrained_acc]
+        print(f"Loaded existing retrained checkpoint from {retrained_path}")
+    else:
+        retrained_acc_history, _ = train_model(
+            retrained_model,
+            keep_loader,
+            testloader,
+            num_epochs=config.num_epochs,
+            device=device,
+            lr=config.training_lr,
+            momentum=config.training_momentum,
+            weight_decay=config.weight_decay,
+            save_path=retrained_path,
+            log_prefix="retrain ",
+            num_classes=config.num_classes,
+            wandb_run=wandb_run,
+            wandb_prefix="retrain",
+            wandb_step_offset=config.num_epochs,
+        )
+
+    if not (loaded_original and loaded_retrained and os.path.exists(original_vs_retrain_plot_path)):
+        original_vs_retrain_plot_path = save_accuracy_history_plot(
+            {
+                "Original (all data)": original_acc_history,
+                "Retrained from scratch": retrained_acc_history,
+            },
+            original_vs_retrain_plot_path,
+            f"Original and retrained-from-scratch test accuracy vs epoch (ResNet-{config.model_depth})",
+        )
     _log_media(wandb_run, wandb_module, "plots/original_vs_retrain", original_vs_retrain_plot_path)
 
     forget_subset, retain_subset = make_forget_retain_subsets(trainset, config.target_label)

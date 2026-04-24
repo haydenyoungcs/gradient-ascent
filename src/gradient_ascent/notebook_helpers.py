@@ -197,6 +197,7 @@ def run_notebook_core_experiment(
     wandb_module=None,
     wandb_project: str = "gradient-ascent",
     wandb_name: str = "core-checkpoints",
+    reuse_existing_checkpoints: bool = False,
 ) -> tuple[CoreExperimentArtifacts, object]:
     wandb_run = ensure_wandb_run(
         wandb_module,
@@ -212,6 +213,7 @@ def run_notebook_core_experiment(
         use_cuda=runtime.use_cuda,
         num_workers=runtime.num_workers,
         config=runtime.core_config,
+        reuse_existing_checkpoints=reuse_existing_checkpoints,
         wandb_run=wandb_run,
         wandb_module=wandb_module,
     )
