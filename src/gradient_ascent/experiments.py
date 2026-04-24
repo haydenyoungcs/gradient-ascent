@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, Mapping, Optional, Sequence
 
+import numpy as np
 import torch
 
 from .data import CIFAR10_CLASSES, make_forget_retain_subsets, make_loader, sample_balanced_class_subsets, subset_for_class
@@ -165,7 +166,7 @@ def _save_classwise_artifacts(
     history,
     config: CoreExperimentConfig,
 ) -> AlgorithmArtifacts:
-    history_tensor = torch.as_tensor(history, dtype=torch.float32).cpu().numpy()
+    history_tensor = np.asarray(history, dtype=np.float32)
     epochs = list(range(history_tensor.shape[0]))
     csv_path = f"{config.out_dir}/classwise_accuracy_{algorithm_key}.csv"
     percent_plot_path = f"{config.out_dir}/classwise_percent_change_{algorithm_key}.png"
