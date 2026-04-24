@@ -239,6 +239,61 @@ def save_classwise_absolute_accuracy_plot(
     return out_path
 
 
+def save_classwise_accuracy_bar_plot(
+    classwise_acc: Sequence[float],
+    class_names: Sequence[str],
+    out_path: str,
+    title: str,
+) -> str:
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    values = 100.0 * np.asarray(classwise_acc, dtype=np.float64)
+    x = np.arange(len(class_names))
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 5), constrained_layout=True)
+    ax.bar(x, values, color="#4c72b0")
+    ax.set_title(title)
+    ax.set_xlabel("Class")
+    ax.set_ylabel("Accuracy (%)")
+    ax.set_ylim(0, 100)
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_names, rotation=30, ha="right")
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    return out_path
+
+
+def save_classwise_percent_difference_bar_plot(
+    original_classwise_acc: Sequence[float],
+    retrained_classwise_acc: Sequence[float],
+    class_names: Sequence[str],
+    out_path: str,
+    title: str,
+) -> str:
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    original = np.asarray(original_classwise_acc, dtype=np.float64)
+    retrained = np.asarray(retrained_classwise_acc, dtype=np.float64)
+    denom = np.where(np.abs(original) < 1e-12, 1e-12, np.abs(original))
+    percent_diff = 100.0 * (retrained - original) / denom
+    x = np.arange(len(class_names))
+    colors = ["#c44e52" if value < 0 else "#4c72b0" for value in percent_diff]
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 5), constrained_layout=True)
+    ax.bar(x, percent_diff, color=colors)
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=0.8)
+    ax.set_title(title)
+    ax.set_xlabel("Class")
+    ax.set_ylabel("Difference vs original (%)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_names, rotation=30, ha="right")
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    return out_path
+
+
 def save_mia_baseline_csv(baseline: Mapping[str, float], out_path: str) -> str:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", newline="") as handle:

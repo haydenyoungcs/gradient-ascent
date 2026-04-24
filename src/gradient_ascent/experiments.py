@@ -13,8 +13,10 @@ from .reporting import (
     load_mia_baseline,
     load_mia_series,
     save_accuracy_history_plot,
+    save_classwise_accuracy_bar_plot,
     save_classwise_absolute_accuracy_plot,
     save_classwise_history_csv,
+    save_classwise_percent_difference_bar_plot,
     save_classwise_percent_change_plot,
     save_metric_summary_plot,
     save_mia_baseline_csv,
@@ -82,6 +84,9 @@ class CoreExperimentArtifacts:
     original_checkpoint_path: str
     retrained_checkpoint_path: str
     original_vs_retrain_plot_path: str
+    original_classwise_plot_path: str
+    retrained_classwise_plot_path: str
+    retrained_vs_original_percent_diff_plot_path: str
     algorithm_artifacts: Dict[str, AlgorithmArtifacts]
     summary_metrics: Dict[str, float]
 
@@ -207,6 +212,8 @@ def run_core_checkpoints(
     num_workers: int,
     config: Optional[CoreExperimentConfig] = None,
     reuse_existing_checkpoints: bool = False,
+    reuse_original_checkpoint: Optional[bool] = None,
+    reuse_retrained_checkpoint: Optional[bool] = None,
     wandb_run=None,
     wandb_module=None,
 ) -> CoreExperimentArtifacts:
@@ -222,9 +229,13 @@ def run_core_checkpoints(
 
     keep_subset = subset_for_class(trainset, config.target_label, include=False)
     keep_loader = make_loader(keep_subset, config.batch_size, True, num_workers, use_cuda)
+    reuse_original = reuse_existing_checkpoints if reuse_original_checkpoint is None else reuse_original_checkpoint
+    reuse_retrained = (
+        reuse_existing_checkpoints if reuse_retrained_checkpoint is None else reuse_retrained_checkpoint
+    )
 
     original_model = model_factory()
-    loaded_original = reuse_existing_checkpoints and os.path.exists(original_path)
+    loaded_original = reuse_original and os.path.exists(original_path)
     if loaded_original:
         original_model.load_state_dict(torch.load(original_path, map_location=device))
         original_acc, _ = evaluate(original_model, testloader, num_classes=config.num_classes, device=device)
@@ -249,7 +260,7 @@ def run_core_checkpoints(
         )
 
     retrained_model = model_factory()
-    loaded_retrained = reuse_existing_checkpoints and os.path.exists(retrained_path)
+    loaded_retrained = reuse_retrained and os.path.exists(retrained_path)
     if loaded_retrained:
         retrained_model.load_state_dict(torch.load(retrained_path, map_location=device))
         retrained_acc, _ = evaluate(retrained_model, testloader, num_classes=config.num_classes, device=device)
@@ -273,15 +284,14 @@ def run_core_checkpoints(
             wandb_step_offset=config.num_epochs,
         )
 
-    if not (loaded_original and loaded_retrained and os.path.exists(original_vs_retrain_plot_path)):
-        original_vs_retrain_plot_path = save_accuracy_history_plot(
-            {
-                "Original (all data)": original_acc_history,
-                "Retrained from scratch": retrained_acc_history,
-            },
-            original_vs_retrain_plot_path,
-            f"Original and retrained-from-scratch test accuracy vs epoch (ResNet-{config.model_depth})",
-        )
+    original_vs_retrain_plot_path = save_accuracy_history_plot(
+        {
+            "Original (all data)": original_acc_history,
+            "Retrained from scratch": retrained_acc_history,
+        },
+        original_vs_retrain_plot_path,
+        f"Original and retrained-from-scratch test accuracy vs epoch (ResNet-{config.model_depth})",
+    )
     _log_media(wandb_run, wandb_module, "plots/original_vs_retrain", original_vs_retrain_plot_path)
 
     forget_subset, retain_subset = make_forget_retain_subsets(trainset, config.target_label)
@@ -393,6 +403,33 @@ def run_core_checkpoints(
 
     original_overall, original_per = evaluate(original_model, testloader, num_classes=config.num_classes, device=device)
     retrained_overall, retrained_per = evaluate(retrained_model, testloader, num_classes=config.num_classes, device=device)
+    original_classwise_plot_path = save_classwise_accuracy_bar_plot(
+        original_per,
+        CIFAR10_CLASSES,
+        f"{config.out_dir}/classwise_accuracy_original.png",
+        f"Original model classwise accuracy (ResNet-{config.model_depth})",
+    )
+    retrained_classwise_plot_path = save_classwise_accuracy_bar_plot(
+        retrained_per,
+        CIFAR10_CLASSES,
+        f"{config.out_dir}/classwise_accuracy_retrained.png",
+        f"Retrained model classwise accuracy (ResNet-{config.model_depth})",
+    )
+    retrained_vs_original_percent_diff_plot_path = save_classwise_percent_difference_bar_plot(
+        original_per,
+        retrained_per,
+        CIFAR10_CLASSES,
+        f"{config.out_dir}/classwise_percent_diff_retrained_vs_original.png",
+        f"Classwise % difference: retrained vs original (ResNet-{config.model_depth})",
+    )
+    _log_media(wandb_run, wandb_module, "plots/classwise_accuracy_original", original_classwise_plot_path)
+    _log_media(wandb_run, wandb_module, "plots/classwise_accuracy_retrained", retrained_classwise_plot_path)
+    _log_media(
+        wandb_run,
+        wandb_module,
+        "plots/classwise_percent_diff_retrained_vs_original",
+        retrained_vs_original_percent_diff_plot_path,
+    )
     summary_metrics = {
         "original_overall_acc": float(original_overall),
         "retrain_overall_acc": float(retrained_overall),
@@ -421,6 +458,9 @@ def run_core_checkpoints(
         original_checkpoint_path=original_path,
         retrained_checkpoint_path=retrained_path,
         original_vs_retrain_plot_path=original_vs_retrain_plot_path,
+        original_classwise_plot_path=original_classwise_plot_path,
+        retrained_classwise_plot_path=retrained_classwise_plot_path,
+        retrained_vs_original_percent_diff_plot_path=retrained_vs_original_percent_diff_plot_path,
         algorithm_artifacts=algorithm_artifacts,
         summary_metrics=summary_metrics,
     )

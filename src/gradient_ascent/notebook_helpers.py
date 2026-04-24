@@ -198,6 +198,8 @@ def run_notebook_core_experiment(
     wandb_project: str = "gradient-ascent",
     wandb_name: str = "core-checkpoints",
     reuse_existing_checkpoints: bool = False,
+    reuse_original_checkpoint: Optional[bool] = None,
+    reuse_retrained_checkpoint: Optional[bool] = None,
 ) -> tuple[CoreExperimentArtifacts, object]:
     wandb_run = ensure_wandb_run(
         wandb_module,
@@ -214,6 +216,8 @@ def run_notebook_core_experiment(
         num_workers=runtime.num_workers,
         config=runtime.core_config,
         reuse_existing_checkpoints=reuse_existing_checkpoints,
+        reuse_original_checkpoint=reuse_original_checkpoint,
+        reuse_retrained_checkpoint=reuse_retrained_checkpoint,
         wandb_run=wandb_run,
         wandb_module=wandb_module,
     )
