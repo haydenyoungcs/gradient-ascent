@@ -24,7 +24,7 @@ from .reporting import (
     save_similarity_trajectory_csv,
 )
 from .certified import CertifiedConfig, run_certified_unlearning
-from .trajectories import compute_epoch_rows_from_snapshots, save_combined_similarity_mia_plot, save_similarity_animation
+from .trajectories import compute_epoch_rows_from_snapshots, save_combined_similarity_mia_plot, save_similarity_heatmap_grid
 from .training import evaluate, train_model
 from .unlearning import (
     GAConfig,
@@ -101,7 +101,7 @@ class TrajectoryExperimentConfig:
 class SimilarityArtifact:
     csv_path: str
     summary_plot_path: str
-    gif_path: str
+    heatmap_plot_path: str
 
 
 @dataclass(frozen=True)
@@ -462,7 +462,9 @@ def run_trajectory_analysis(
             summary_plot_path = (
                 f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_summary.png"
             )
-            gif_path = f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}.gif"
+            heatmap_plot_path = (
+                f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_heatmap.png"
+            )
 
             save_similarity_trajectory_csv(epoch_rows, csv_path, metric_names)
             save_metric_summary_plot(
@@ -473,14 +475,14 @@ def run_trajectory_analysis(
                 metric_names,
                 lower_better_metrics,
             )
-            save_similarity_animation(
+            save_similarity_heatmap_grid(
                 epoch_rows,
-                gif_path,
+                heatmap_plot_path,
                 algorithm_key,
                 reference_key,
                 layer_names,
                 metric_names,
-                transform_rows_for_plot,
+                lower_better_metrics,
             )
             _log_media(
                 wandb_run,
@@ -491,13 +493,13 @@ def run_trajectory_analysis(
             _log_media(
                 wandb_run,
                 wandb_module,
-                f"videos/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}",
-                gif_path,
+                f"plots/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_heatmap",
+                heatmap_plot_path,
             )
             similarity_artifacts[algorithm_key][reference_key] = SimilarityArtifact(
                 csv_path=csv_path,
                 summary_plot_path=summary_plot_path,
-                gif_path=gif_path,
+                heatmap_plot_path=heatmap_plot_path,
             )
 
     forget_subset, _retain_subset = make_forget_retain_subsets(trainset, config.target_label)

@@ -21,7 +21,10 @@ should be forgotten while staying similar on the data that should be retained.
 In this repository, the student starts from the original checkpoint. During
 unlearning, it is pushed away from the teacher on the forget set using a
 negative distillation term, and pulled back toward the teacher on the retain
-set using KL-based distillation and retain-label cross-entropy.
+set using KL-based distillation and retain-label cross-entropy. The current
+implementation applies these retain and forget terms together within each
+update step, which is simpler and noticeably more stable than separating the
+two phases too aggressively.
 
 This implementation is an adapted repository baseline, not a claim of exact
 paper reproduction. The goal is to preserve SCRUB's main retain-versus-forget

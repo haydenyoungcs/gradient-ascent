@@ -76,15 +76,16 @@ def build_default_core_config(
     use_bf16: bool = False,
 ) -> CoreExperimentConfig:
     """Return the notebook's default baseline configuration bundle."""
-    # GA now gets a slightly longer and slightly stronger schedule. This keeps
-    # the baseline easy to explain as vanilla gradient ascent on the forget
-    # set, but gives the forgetting signal more time to accumulate.
+    # GA now uses a deliberately stronger schedule. The method is still plain
+    # gradient ascent on the forget set, but we let it see every forget batch
+    # each epoch, run for longer, and take larger steps so the forgetting
+    # effect is strong enough to be clearly visible.
     ga_config = GAConfig(
-        lr=1e-5,
-        epochs=15,
-        max_batches_per_epoch=12,
+        lr=3e-5,
+        epochs=25,
+        max_batches_per_epoch=None,
         freeze_bn=True,
-        grad_clip_norm=5.0,
+        grad_clip_norm=10.0,
     )
     # SSD is currently the strongest-looking baseline in this project, so the
     # default notebook preset only nudges it slightly toward stronger
@@ -103,7 +104,7 @@ def build_default_core_config(
     # a lot of accuracy. The revised preset is more retain-focused and gentler
     # per update, while still preserving the same teacher-student KL idea.
     scrub_config = SCRUBConfig(
-        lr=2e-4,
+        lr=1e-4,
         epochs=8,
         alpha=2.0,
         beta=0.4,

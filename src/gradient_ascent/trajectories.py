@@ -6,7 +6,8 @@ from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.animation import FuncAnimation, PillowWriter
+
+from .reporting import orient_epoch_rows_for_similarity
 
 
 EpochRows = Sequence[Tuple[int, List[dict]]]
@@ -49,56 +50,64 @@ def compute_epoch_rows_from_snapshots(
     return sorted(epoch_rows, key=lambda item: item[0])
 
 
-def save_similarity_animation(
+def save_similarity_heatmap_grid(
     epoch_rows: EpochRows,
     out_path: str,
     algorithm_key: str,
     reference_key: str,
     layer_names: Iterable[str],
     metric_names: Iterable[str],
-    transform_rows_for_plot: Callable[[List[dict]], List[dict]],
-    interval_ms: int = 900,
-    fps: int = 1,
+    lower_better_metrics: Iterable[str],
 ) -> str:
     layer_names = list(layer_names)
     metric_names = list(metric_names)
+    oriented_rows = orient_epoch_rows_for_similarity(epoch_rows, metric_names, lower_better_metrics)
+    epochs = [epoch for epoch, _ in oriented_rows]
 
-    fig_anim, ax_anim = plt.subplots(1, 1, figsize=(18, 6), constrained_layout=True)
+    matrices = {metric_name: np.zeros((len(layer_names), len(epochs)), dtype=np.float64) for metric_name in metric_names}
+    layer_to_idx = {layer_name: idx for idx, layer_name in enumerate(layer_names)}
+    for epoch_idx, (_epoch, rows) in enumerate(oriented_rows):
+        for row in rows:
+            layer_idx = layer_to_idx[row["layer"]]
+            for metric_name in metric_names:
+                matrices[metric_name][layer_idx, epoch_idx] = float(row[metric_name])
 
-    def draw_frame(frame_idx: int) -> None:
-        epoch_num, rows = epoch_rows[frame_idx]
-        rows_plot = transform_rows_for_plot(rows)
-        layer_to_row = {row["layer"]: row for row in rows_plot}
+    n_metrics = len(metric_names)
+    n_cols = min(2, n_metrics)
+    n_rows = int(np.ceil(n_metrics / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 4.3 * n_rows), constrained_layout=True)
+    axes = np.array(axes).reshape(-1)
 
-        ax_anim.clear()
-
-        x = np.arange(len(metric_names), dtype=np.float64)
-        n_layers = len(layer_names)
-        total_group_width = 0.84
-        bar_width = total_group_width / n_layers
-        offsets = (np.arange(n_layers) - (n_layers - 1) / 2.0) * bar_width
-
-        for idx, layer in enumerate(layer_names):
-            vals = [layer_to_row[layer][metric_name] for metric_name in metric_names]
-            ax_anim.bar(x + offsets[idx], vals, width=bar_width, label=layer)
-
-        ref_label = reference_key.capitalize()
-        ax_anim.set_xticks(x)
-        ax_anim.set_xticklabels(metric_names, rotation=20)
-        ax_anim.set_title(
-            f"{algorithm_key.upper()}: Unlearned_t vs {ref_label} (step={epoch_num})\n"
-            "(all metrics scaled to higher = more similar)"
+    for idx, metric_name in enumerate(metric_names):
+        ax = axes[idx]
+        im = ax.imshow(
+            matrices[metric_name],
+            aspect="auto",
+            cmap="viridis",
+            vmin=0.0,
+            vmax=1.0,
+            origin="lower",
+            interpolation="nearest",
         )
-        ax_anim.set_xlabel("Metric")
-        ax_anim.set_ylabel("Similarity")
-        ax_anim.grid(axis="y", alpha=0.3)
+        ax.set_title(metric_name)
+        ax.set_xlabel("Unlearning step")
+        ax.set_ylabel("Layer")
+        ax.set_xticks(range(len(epochs)))
+        ax.set_xticklabels(epochs)
+        ax.set_yticks(range(len(layer_names)))
+        ax.set_yticklabels(layer_names)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("Similarity")
 
-        handles, labels = ax_anim.get_legend_handles_labels()
-        fig_anim.legend(handles, labels, loc="upper center", ncol=3, frameon=True)
+    for idx in range(n_metrics, len(axes)):
+        axes[idx].axis("off")
 
-    ani = FuncAnimation(fig_anim, draw_frame, frames=len(epoch_rows), interval=interval_ms, repeat=True)
-    ani.save(out_path, writer=PillowWriter(fps=fps))
-    plt.close(fig_anim)
+    fig.suptitle(
+        f"{algorithm_key.upper()} vs {reference_key.capitalize()} across layers\n"
+        "(all metrics scaled to higher = more similar)"
+    )
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
     return out_path
 
 

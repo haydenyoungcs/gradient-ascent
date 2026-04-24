@@ -139,10 +139,16 @@ class SCRUBConfig:
     * move away from the teacher on ``D_f`` via a negative KL term.
 
     To keep the implementation easy to compare with the existing baselines and
-    easy to explain in a dissertation, we alternate a forget pass and a retain
-    pass within each epoch, then snapshot/evaluate exactly as for GA and
-    SalUn. This preserves SCRUB's retain-preservation / forget-divergence
-    structure while fitting the repository's existing baseline interface.
+    easy to explain in a dissertation, we use a paired-batch objective within
+    each epoch: every forget batch is matched with a retain batch and the
+    update minimises
+
+    ``alpha * KL(student_r || teacher_r) + gamma * CE(student_r, y_r)
+      - beta * KL(student_f || teacher_f)``.
+
+    This preserves SCRUB's retain-preservation / forget-divergence structure
+    while avoiding the large oscillations that can appear if a whole forget pass
+    is followed by a whole retain pass.
     """
 
     lr: float = 5e-4
@@ -715,16 +721,16 @@ def run_scrub_unlearning(
 ):
     """SCRUB teacher-student unlearning adapted to this repository.
 
-    The student is updated while the teacher is frozen. Each epoch alternates:
+    The student is updated while the teacher is frozen. Each optimisation step
+    combines one forget batch and one retain batch:
 
-    1. a forget pass that *maximises* student-teacher KL divergence on
-       ``D_f`` by minimising ``-beta * KL_T``; and
-    2. a retain pass that *minimises* ``alpha * KL_T + gamma * CE`` on
-       ``D_r``.
+    ``L = alpha * KL_T(retain) + gamma * CE(retain) - beta * KL_T(forget)``.
 
     This is a faithful implementation of SCRUB's retain-preservation /
     forget-divergence idea, adapted to the repository's per-epoch snapshot
-    interface rather than the original authors' notebook training harness.
+    interface rather than the original authors' notebook training harness. In
+    practice this paired-batch form is noticeably more stable than running an
+    entire forget phase and then an entire retain phase.
     """
     config = config or SCRUBConfig()
     if retain_loader is None:
@@ -752,6 +758,8 @@ def run_scrub_unlearning(
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
 
+    retain_iter = _infinite_loader(retain_loader)
+
     for epoch in range(1, config.epochs + 1):
         model.train()
         if config.freeze_bn:
@@ -759,19 +767,31 @@ def run_scrub_unlearning(
 
         forget_kl_sum = 0.0
         forget_batches = 0
-        for inputs, _labels in forget_loader:
-            inputs = inputs.to(device, non_blocking=True)
+        retain_kl_sum = 0.0
+        retain_ce_sum = 0.0
+        retain_batches = 0
+
+        for forget_inputs, _forget_labels in forget_loader:
+            retain_inputs, retain_labels = next(retain_iter)
+            forget_inputs = forget_inputs.to(device, non_blocking=True)
+            retain_inputs = retain_inputs.to(device, non_blocking=True)
+            retain_labels = retain_labels.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type="cuda", dtype=amp.dtype, enabled=amp.enabled):
-                student_logits = model(inputs)
+                student_forget_logits = model(forget_inputs)
+                student_retain_logits = model(retain_inputs)
                 with torch.no_grad():
-                    teacher_logits = teacher(inputs)
-                forget_kl = _distill_kl(student_logits, teacher_logits, config.temperature)
-                loss = -config.beta * forget_kl
+                    teacher_forget_logits = teacher(forget_inputs)
+                    teacher_retain_logits = teacher(retain_inputs)
+
+                forget_kl = _distill_kl(student_forget_logits, teacher_forget_logits, config.temperature)
+                retain_kl = _distill_kl(student_retain_logits, teacher_retain_logits, config.temperature)
+                retain_ce = criterion(student_retain_logits.float(), retain_labels)
+                loss = config.alpha * retain_kl + config.gamma * retain_ce - config.beta * forget_kl
 
             if not torch.isfinite(loss.detach()):
-                raise RuntimeError(f"Non-finite SCRUB forget loss at epoch {epoch}.")
+                raise RuntimeError(f"Non-finite SCRUB loss at epoch {epoch}.")
             _optimizer_step_with_optional_clip(
                 loss,
                 optimizer,
@@ -782,37 +802,6 @@ def run_scrub_unlearning(
             )
             forget_kl_sum += float(forget_kl.detach().item())
             forget_batches += 1
-
-        model.train()
-        if config.freeze_bn:
-            _set_bn_eval(model)
-
-        retain_kl_sum = 0.0
-        retain_ce_sum = 0.0
-        retain_batches = 0
-        for inputs, labels in retain_loader:
-            inputs = inputs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
-
-            with torch.autocast(device_type="cuda", dtype=amp.dtype, enabled=amp.enabled):
-                student_logits = model(inputs)
-                with torch.no_grad():
-                    teacher_logits = teacher(inputs)
-                retain_kl = _distill_kl(student_logits, teacher_logits, config.temperature)
-                retain_ce = criterion(student_logits.float(), labels)
-                loss = config.alpha * retain_kl + config.gamma * retain_ce
-
-            if not torch.isfinite(loss.detach()):
-                raise RuntimeError(f"Non-finite SCRUB retain loss at epoch {epoch}.")
-            _optimizer_step_with_optional_clip(
-                loss,
-                optimizer,
-                scaler,
-                amp,
-                trainable_params,
-                config.grad_clip_norm,
-            )
             retain_kl_sum += float(retain_kl.detach().item())
             retain_ce_sum += float(retain_ce.detach().item())
             retain_batches += 1

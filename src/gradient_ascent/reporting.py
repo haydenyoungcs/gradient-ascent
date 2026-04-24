@@ -38,6 +38,35 @@ def build_mean_metric_series(
     return epochs, series
 
 
+def orient_epoch_rows_for_similarity(
+    epoch_rows: Sequence[Tuple[int, List[dict]]],
+    metric_names: Iterable[str],
+    lower_better_metrics: Iterable[str],
+) -> Sequence[Tuple[int, List[dict]]]:
+    """Return rows with all metrics oriented to higher = more similar."""
+    metric_names = list(metric_names)
+    lower_better_metrics = set(lower_better_metrics)
+    oriented_rows = [(epoch, [{**row} for row in rows]) for epoch, rows in epoch_rows]
+
+    for metric_name in metric_names:
+        if metric_name not in lower_better_metrics:
+            continue
+        vals = np.array(
+            [float(row[metric_name]) for _epoch, rows in oriented_rows for row in rows],
+            dtype=np.float64,
+        )
+        vmin = float(np.min(vals))
+        vmax = float(np.max(vals))
+        for _epoch, rows in oriented_rows:
+            for row in rows:
+                val = float(row[metric_name])
+                if vmax > vmin:
+                    row[metric_name] = 1.0 - ((val - vmin) / (vmax - vmin))
+                else:
+                    row[metric_name] = 0.5
+    return oriented_rows
+
+
 def save_metric_summary_plot(
     epoch_rows: Sequence[Tuple[int, List[dict]]],
     out_path: str,
@@ -46,28 +75,41 @@ def save_metric_summary_plot(
     lower_better_metrics: Iterable[str],
 ) -> None:
     metric_names = list(metric_names)
-    lower_better_metrics = set(lower_better_metrics)
-    epochs, series = build_mean_metric_series(epoch_rows, metric_names)
+    oriented_rows = orient_epoch_rows_for_similarity(epoch_rows, metric_names, lower_better_metrics)
+    epochs = [epoch for epoch, _ in oriented_rows]
 
-    for metric_name in lower_better_metrics:
-        vals = np.array(series[metric_name], dtype=np.float64)
-        vmin = float(np.min(vals))
-        vmax = float(np.max(vals))
-        if vmax > vmin:
-            vals = (vals - vmin) / (vmax - vmin)
-        else:
-            vals = np.full_like(vals, 0.5)
-        series[metric_name] = list(1.0 - vals)
+    stats_by_metric = {metric_name: {"mean": [], "min": [], "max": []} for metric_name in metric_names}
+    for _epoch, rows in oriented_rows:
+        for metric_name in metric_names:
+            vals = np.array([float(row[metric_name]) for row in rows], dtype=np.float64)
+            stats_by_metric[metric_name]["mean"].append(float(np.mean(vals)))
+            stats_by_metric[metric_name]["min"].append(float(np.min(vals)))
+            stats_by_metric[metric_name]["max"].append(float(np.max(vals)))
 
-    fig, ax = plt.subplots(1, 1, figsize=(16, 5), constrained_layout=True)
-    for metric_name in metric_names:
-        ax.plot(epochs, series[metric_name], marker="o", label=metric_name)
+    n_metrics = len(metric_names)
+    n_cols = min(2, n_metrics)
+    n_rows = int(np.ceil(n_metrics / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 4.2 * n_rows), constrained_layout=True)
+    axes = np.array(axes).reshape(-1)
 
-    ax.set_title(title)
-    ax.set_xlabel("Unlearning step")
-    ax.set_ylabel("Similarity (mean across layers)")
-    ax.grid(alpha=0.3)
-    ax.legend(ncol=3)
+    for idx, metric_name in enumerate(metric_names):
+        ax = axes[idx]
+        metric_stats = stats_by_metric[metric_name]
+        mean_vals = np.array(metric_stats["mean"], dtype=np.float64)
+        min_vals = np.array(metric_stats["min"], dtype=np.float64)
+        max_vals = np.array(metric_stats["max"], dtype=np.float64)
+        ax.plot(epochs, mean_vals, marker="o", linewidth=2)
+        ax.fill_between(epochs, min_vals, max_vals, alpha=0.2)
+        ax.set_title(metric_name)
+        ax.set_xlabel("Unlearning step")
+        ax.set_ylabel("Similarity to reference")
+        ax.set_ylim(0.0, 1.02)
+        ax.grid(alpha=0.3)
+
+    for idx in range(n_metrics, len(axes)):
+        axes[idx].axis("off")
+
+    fig.suptitle(title)
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
 
@@ -124,15 +166,55 @@ def save_classwise_percent_change_plot(
     denom = np.where(initial_acc == 0, 1e-12, initial_acc)
     percent_change = 100.0 * (np.asarray(history, dtype=np.float64) - initial_acc) / denom
 
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6), constrained_layout=True)
-    for class_idx, class_name in enumerate(class_names):
-        ax.plot(epochs, percent_change[:, class_idx], label=class_name)
+    final_change = percent_change[-1]
+    order = np.argsort(final_change)
+    ordered_classes = [class_names[idx] for idx in order]
+    ordered_percent_change = percent_change[:, order].T
+    ordered_final_change = final_change[order]
 
-    ax.set_xlabel("Unlearning step")
-    ax.set_ylabel("Accuracy change (%)")
-    ax.set_title(title)
-    ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
-    ax.legend(loc="lower left", fontsize="small", ncol=2)
+    vmax = float(np.max(np.abs(percent_change)))
+    if vmax == 0.0:
+        vmax = 1.0
+
+    fig, (ax_heatmap, ax_bar) = plt.subplots(
+        1,
+        2,
+        figsize=(14, 6),
+        constrained_layout=True,
+        gridspec_kw={"width_ratios": [3.4, 1.2]},
+    )
+
+    extent = [float(epochs[0]) - 0.5, float(epochs[-1]) + 0.5, -0.5, len(class_names) - 0.5]
+    im = ax_heatmap.imshow(
+        ordered_percent_change,
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=-vmax,
+        vmax=vmax,
+        extent=extent,
+        origin="lower",
+        interpolation="nearest",
+    )
+    ax_heatmap.set_title(title)
+    ax_heatmap.set_xlabel("Unlearning step")
+    ax_heatmap.set_ylabel("Class")
+    ax_heatmap.set_xticks(list(epochs))
+    ax_heatmap.set_yticks(range(len(ordered_classes)))
+    ax_heatmap.set_yticklabels(ordered_classes)
+
+    cbar = fig.colorbar(im, ax=ax_heatmap, fraction=0.046, pad=0.04)
+    cbar.set_label("Relative accuracy change (%)")
+
+    y_pos = np.arange(len(ordered_classes))
+    colors = ["#c44e52" if val < 0 else "#4c72b0" for val in ordered_final_change]
+    ax_bar.barh(y_pos, ordered_final_change, color=colors)
+    ax_bar.axvline(0, color="black", linestyle="--", linewidth=0.8)
+    ax_bar.set_title("Final step")
+    ax_bar.set_xlabel("Change (%)")
+    ax_bar.set_yticks(y_pos)
+    ax_bar.set_yticklabels([])
+    ax_bar.grid(axis="x", alpha=0.3)
+
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
     return out_path
@@ -148,15 +230,54 @@ def save_classwise_absolute_accuracy_plot(
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     history = 100.0 * np.asarray(history, dtype=np.float64)
 
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6), constrained_layout=True)
-    for class_idx, class_name in enumerate(class_names):
-        ax.plot(epochs, history[:, class_idx], label=class_name)
+    final_acc = history[-1]
+    initial_acc = history[0]
+    delta = final_acc - initial_acc
+    order = np.argsort(final_acc)
+    ordered_classes = [class_names[idx] for idx in order]
+    ordered_history = history[:, order].T
+    ordered_final_acc = final_acc[order]
+    ordered_delta = delta[order]
 
-    ax.set_xlabel("Unlearning step")
-    ax.set_ylabel("Class accuracy (%)")
-    ax.set_title(title)
-    ax.set_ylim(0, 100)
-    ax.legend(loc="lower left", fontsize="small", ncol=2)
+    fig, (ax_heatmap, ax_bar) = plt.subplots(
+        1,
+        2,
+        figsize=(14, 6),
+        constrained_layout=True,
+        gridspec_kw={"width_ratios": [3.4, 1.2]},
+    )
+
+    extent = [float(epochs[0]) - 0.5, float(epochs[-1]) + 0.5, -0.5, len(class_names) - 0.5]
+    im = ax_heatmap.imshow(
+        ordered_history,
+        aspect="auto",
+        cmap="viridis",
+        vmin=0.0,
+        vmax=100.0,
+        extent=extent,
+        origin="lower",
+        interpolation="nearest",
+    )
+    ax_heatmap.set_title(title)
+    ax_heatmap.set_xlabel("Unlearning step")
+    ax_heatmap.set_ylabel("Class")
+    ax_heatmap.set_xticks(list(epochs))
+    ax_heatmap.set_yticks(range(len(ordered_classes)))
+    ax_heatmap.set_yticklabels(ordered_classes)
+
+    cbar = fig.colorbar(im, ax=ax_heatmap, fraction=0.046, pad=0.04)
+    cbar.set_label("Class accuracy (%)")
+
+    y_pos = np.arange(len(ordered_classes))
+    colors = ["#c44e52" if val < 0 else "#4c72b0" for val in ordered_delta]
+    ax_bar.barh(y_pos, ordered_final_acc, color=colors)
+    ax_bar.set_title("Final step")
+    ax_bar.set_xlabel("Accuracy (%)")
+    ax_bar.set_xlim(0, 100)
+    ax_bar.set_yticks(y_pos)
+    ax_bar.set_yticklabels([])
+    ax_bar.grid(axis="x", alpha=0.3)
+
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
     return out_path
