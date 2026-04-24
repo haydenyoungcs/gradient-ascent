@@ -41,16 +41,19 @@ class SCRUBConfig:
     ``alpha * KL(student_r || teacher_r) + gamma * CE(student_r, y_r)
       - beta * KL(student_f || teacher_f)``.
 
-    After that, the student switches to retain-only recovery epochs. This keeps
-    SCRUB's retain-preservation / forget-divergence structure while avoiding the
-    failure mode where the forget term keeps pushing the whole model away from
-    the teacher long after the target class has already been damaged.
+    After that, the student enters a recovery phase where the forget term is not
+    removed entirely, but reduced sharply. This avoids the failure mode where a
+    single destructive scrub step is immediately undone by pure retain-only
+    training, while still keeping later epochs much more retain-focused than the
+    initial scrub phase.
     """
 
     lr: float = 5e-4
     epochs: int = 5
     forget_phase_epochs: int = 2
     max_forget_batches_per_epoch: Optional[int] = None
+    recovery_beta_scale: float = 0.0
+    recovery_max_forget_batches_per_epoch: Optional[int] = None
     alpha: float = 1.0
     beta: float = 1.0
     gamma: float = 1.0
@@ -86,6 +89,10 @@ def run_scrub_unlearning(
     if config.forget_phase_epochs < 0 or config.forget_phase_epochs > config.epochs:
         raise ValueError(
             f"forget_phase_epochs must lie in [0, epochs], got {config.forget_phase_epochs} for epochs={config.epochs}."
+        )
+    if config.recovery_beta_scale < 0.0 or config.recovery_beta_scale > 1.0:
+        raise ValueError(
+            f"recovery_beta_scale must lie in [0, 1], got {config.recovery_beta_scale}."
         )
 
     amp = build_amp_config(device)
@@ -126,12 +133,16 @@ def run_scrub_unlearning(
         retain_ce_sum = 0.0
         retain_batches = 0
 
-        if in_forget_phase:
+        epoch_beta_scale = 1.0 if in_forget_phase else config.recovery_beta_scale
+        max_forget_batches = (
+            config.max_forget_batches_per_epoch
+            if in_forget_phase
+            else config.recovery_max_forget_batches_per_epoch
+        )
+
+        if epoch_beta_scale > 0.0:
             for batch_idx, (forget_inputs, _forget_labels) in enumerate(forget_loader):
-                if (
-                    config.max_forget_batches_per_epoch is not None
-                    and batch_idx >= config.max_forget_batches_per_epoch
-                ):
+                if max_forget_batches is not None and batch_idx >= max_forget_batches:
                     break
                 retain_inputs, retain_labels = next(retain_iter)
                 forget_inputs = forget_inputs.to(device, non_blocking=True)
@@ -149,7 +160,11 @@ def run_scrub_unlearning(
                     forget_kl = _distill_kl(student_forget_logits, teacher_forget_logits, config.temperature)
                     retain_kl = _distill_kl(student_retain_logits, teacher_retain_logits, config.temperature)
                     retain_ce = criterion(student_retain_logits.float(), retain_labels)
-                    loss = config.alpha * retain_kl + config.gamma * retain_ce - config.beta * forget_kl
+                    loss = (
+                        config.alpha * retain_kl
+                        + config.gamma * retain_ce
+                        - (config.beta * epoch_beta_scale) * forget_kl
+                    )
 
                 if not torch.isfinite(loss.detach()):
                     raise RuntimeError(f"Non-finite SCRUB loss at epoch {epoch}.")
@@ -166,7 +181,8 @@ def run_scrub_unlearning(
                 retain_kl_sum += float(retain_kl.detach().item())
                 retain_ce_sum += float(retain_ce.detach().item())
                 retain_batches += 1
-        else:
+
+        if not in_forget_phase:
             for retain_inputs, retain_labels in retain_loader:
                 retain_inputs = retain_inputs.to(device, non_blocking=True)
                 retain_labels = retain_labels.to(device, non_blocking=True)

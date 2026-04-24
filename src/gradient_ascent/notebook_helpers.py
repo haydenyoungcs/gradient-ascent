@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -76,40 +77,42 @@ def build_default_core_config(
     use_bf16: bool = False,
 ) -> CoreExperimentConfig:
     """Return the notebook's default baseline configuration bundle."""
-    # GA now uses a sharper but shorter schedule. The method is still plain
-    # gradient ascent on the forget set, but instead of a long run over every
-    # forget batch each epoch, we take somewhat larger steps for fewer capped
-    # updates. In practice this tends to damage the target class more directly
-    # while reducing the slow collateral drift on the retained classes.
+    # GA now uses a somewhat higher learning rate but fewer epochs. The method
+    # is still plain gradient ascent on the forget set; the goal here is to hit
+    # the target class harder early on while reducing how long forget-only
+    # updates have to spread collateral damage across the retained classes.
     ga_config = GAConfig(
-        lr=6e-5,
-        epochs=14,
+        lr=8e-5,
+        epochs=10,
         max_batches_per_epoch=12,
         freeze_bn=True,
         grad_clip_norm=7.5,
     )
-    # SSD can become effectively a no-op if the selection threshold is a little
-    # too strict for the current checkpoint, so the notebook preset keeps the
-    # same one-shot rule but uses a slightly more permissive threshold to make
-    # sure some forget-dominated parameters are actually selected and damped.
+    # For SSD we want stronger forgetting on the target class without turning
+    # the one-shot dampening step into broad collateral damage. The preset below
+    # therefore moves in three easy-to-explain directions at once: slightly
+    # more permissive selection, slightly stronger dampening on selected
+    # weights, and more stable Fisher estimates from larger samples.
     ssd_config = SSDConfig(
-        alpha=6.5,
-        lambda_=0.85,
+        alpha=4.5,
+        lambda_=0.7,
         eps=1e-12,
-        fisher_batches=100,
-        fisher_samples_per_batch=32,
+        fisher_batches=200,
+        fisher_samples_per_batch=64,
         selection_basis="retain",
     )
-    # The earlier SCRUB preset still hit the model too hard in the initial
-    # forget phase, producing unrealistic collapses before recovery. This
-    # notebook preset keeps the same teacher-student idea but makes the scrub
-    # phase much shorter and smaller, then gives the retain-only recovery phase
-    # more room to stabilise the non-forget classes.
+    # The earlier SCRUB preset still behaved too much like "break it once, then
+    # let it bounce back". This preset keeps one short stronger scrub epoch,
+    # then continues with a very small residual forget signal during recovery so
+    # the forgotten class does not immediately snap back while the retain set is
+    # being recovered.
     scrub_config = SCRUBConfig(
         lr=5e-5,
         epochs=12,
         forget_phase_epochs=1,
-        max_forget_batches_per_epoch=6,
+        max_forget_batches_per_epoch=4,
+        recovery_beta_scale=0.1,
+        recovery_max_forget_batches_per_epoch=1,
         alpha=4.0,
         beta=0.15,
         gamma=4.0,
@@ -146,6 +149,8 @@ def build_core_wandb_config(config: CoreExperimentConfig) -> dict[str, object]:
         "scrub_epochs": config.scrub_config.epochs,
         "scrub_forget_phase_epochs": config.scrub_config.forget_phase_epochs,
         "scrub_max_forget_batches_per_epoch": config.scrub_config.max_forget_batches_per_epoch,
+        "scrub_recovery_beta_scale": config.scrub_config.recovery_beta_scale,
+        "scrub_recovery_max_forget_batches_per_epoch": config.scrub_config.recovery_max_forget_batches_per_epoch,
         "scrub_alpha": config.scrub_config.alpha,
         "scrub_beta": config.scrub_config.beta,
         "scrub_gamma": config.scrub_config.gamma,
