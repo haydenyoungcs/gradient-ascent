@@ -26,7 +26,26 @@ from .reporting import (
 from .certified import CertifiedConfig, run_certified_unlearning
 from .trajectories import compute_epoch_rows_from_snapshots, save_combined_similarity_mia_plot, save_similarity_animation
 from .training import evaluate, train_model
-from .unlearning import GAConfig, SSDConfig, SalUnConfig, run_ga_unlearning, run_salun_unlearning, run_ssd_unlearning
+from .unlearning import (
+    GAConfig,
+    SCRUBConfig,
+    SSDConfig,
+    SalUnConfig,
+    run_ga_unlearning,
+    run_salun_unlearning,
+    run_scrub_unlearning,
+    run_ssd_unlearning,
+)
+
+
+DEFAULT_ALGO_KEYS = ("ga", "ssd", "salun", "certified", "scrub")
+DEFAULT_ALGO_DISPLAY = {
+    "ga": "Gradient Ascent (GA)",
+    "ssd": "Selective Synaptic Dampening (SSD)",
+    "salun": "SalUn",
+    "certified": "Certified Removal",
+    "scrub": "SCRUB",
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +64,7 @@ class CoreExperimentConfig:
     ssd_config: SSDConfig = field(default_factory=SSDConfig)
     salun_config: SalUnConfig = field(default_factory=SalUnConfig)
     certified_config: CertifiedConfig = field(default_factory=CertifiedConfig)
+    scrub_config: SCRUBConfig = field(default_factory=SCRUBConfig)
 
 
 @dataclass(frozen=True)
@@ -101,15 +121,8 @@ class TrajectoryExperimentArtifacts:
 @dataclass(frozen=True)
 class CombinedComparisonConfig:
     out_dir: str = "out"
-    algo_keys: Sequence[str] = ("ga", "ssd", "salun", "certified")
-    algo_display: Mapping[str, str] = field(
-        default_factory=lambda: {
-            "ga": "Gradient Ascent (GA)",
-            "ssd": "Selective Synaptic Dampening (SSD)",
-            "salun": "SalUn",
-            "certified": "Certified Removal",
-        }
-    )
+    algo_keys: Sequence[str] = DEFAULT_ALGO_KEYS
+    algo_display: Mapping[str, str] = field(default_factory=lambda: dict(DEFAULT_ALGO_DISPLAY))
     reference_key: str = "retrained"
     lower_better_metrics: Sequence[str] = ("euclidean", "kl_sym")
     mia_panels: Sequence[tuple[str, str]] = (
@@ -252,6 +265,17 @@ def run_core_checkpoints(
     unlearn_batch_size = config.unlearn_batch_size or 256
     forget_loader = make_loader(forget_subset, unlearn_batch_size, True, num_workers, use_cuda)
     retain_loader = make_loader(retain_subset, unlearn_batch_size, True, num_workers, use_cuda)
+    scrub_batch_size = config.scrub_config.batch_size or unlearn_batch_size
+    scrub_forget_loader = (
+        forget_loader
+        if scrub_batch_size == unlearn_batch_size
+        else make_loader(forget_subset, scrub_batch_size, True, num_workers, use_cuda)
+    )
+    scrub_retain_loader = (
+        retain_loader
+        if scrub_batch_size == unlearn_batch_size
+        else make_loader(retain_subset, scrub_batch_size, True, num_workers, use_cuda)
+    )
 
     ga_model = model_factory()
     ga_model.load_state_dict(torch.load(original_path, map_location=device))
@@ -309,6 +333,20 @@ def run_core_checkpoints(
     )
     torch.save(certified_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_certified.pt")
 
+    scrub_model = model_factory()
+    scrub_model.load_state_dict(torch.load(original_path, map_location=device))
+    scrub_result = run_scrub_unlearning(
+        scrub_model,
+        scrub_forget_loader,
+        scrub_retain_loader,
+        testloader,
+        device,
+        config=config.scrub_config,
+        num_classes=config.num_classes,
+        snapshot_dir=f"{config.out_dir}/unlearning_snapshots_scrub",
+    )
+    torch.save(scrub_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_scrub.pt")
+
     algorithm_artifacts = {
         "ga": _save_classwise_artifacts("ga", "GA", ga_result["classwise_history"], config),
         "ssd": _save_classwise_artifacts("ssd", "SSD", ssd_result["classwise_history"], config),
@@ -319,6 +357,7 @@ def run_core_checkpoints(
             certified_result["classwise_history"],
             config,
         ),
+        "scrub": _save_classwise_artifacts("scrub", "SCRUB", scrub_result["classwise_history"], config),
     }
     for algorithm_key, artifact in algorithm_artifacts.items():
         _log_media(wandb_run, wandb_module, f"plots/classwise_percent_change_{algorithm_key}", artifact.classwise_percent_plot_path)
@@ -331,15 +370,27 @@ def run_core_checkpoints(
 
     original_overall, original_per = evaluate(original_model, testloader, num_classes=config.num_classes, device=device)
     retrained_overall, retrained_per = evaluate(retrained_model, testloader, num_classes=config.num_classes, device=device)
-    ga_overall, ga_per = evaluate(ga_result["model"], testloader, num_classes=config.num_classes, device=device)
     summary_metrics = {
         "original_overall_acc": float(original_overall),
         "retrain_overall_acc": float(retrained_overall),
-        "unlearned_ga_overall_acc": float(ga_overall),
         f"class_{config.target_label}_original_acc": float(original_per[config.target_label]),
         f"class_{config.target_label}_retrain_acc": float(retrained_per[config.target_label]),
-        f"class_{config.target_label}_unlearned_ga_acc": float(ga_per[config.target_label]),
     }
+    baseline_results = {
+        "ga": ga_result,
+        "ssd": ssd_result,
+        "salun": salun_result,
+        "certified": certified_result,
+        "scrub": scrub_result,
+    }
+    for algorithm_key, result in baseline_results.items():
+        overall_acc, per_class_acc = evaluate(
+            result["model"], testloader, num_classes=config.num_classes, device=device
+        )
+        summary_metrics[f"unlearned_{algorithm_key}_overall_acc"] = float(overall_acc)
+        summary_metrics[f"class_{config.target_label}_unlearned_{algorithm_key}_acc"] = float(
+            per_class_acc[config.target_label]
+        )
     if wandb_run is not None:
         wandb_run.log({f"summary/{key}": value for key, value in summary_metrics.items()})
 

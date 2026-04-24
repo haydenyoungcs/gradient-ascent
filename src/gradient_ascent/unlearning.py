@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
@@ -7,6 +8,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from .training import build_amp_config, evaluate
@@ -78,6 +80,7 @@ class SSDConfig:
     lambda_: float = 1.0
     eps: float = 1e-12
     fisher_batches: int = 100
+    fisher_samples_per_batch: int = 32
     selection_basis: str = "retain"
 
 
@@ -122,6 +125,38 @@ class SalUnConfig:
     retain_weight: Optional[float] = None
 
 
+@dataclass(frozen=True)
+class SCRUBConfig:
+    """SCRUB: teacher-student approximate unlearning (Kurmanji et al., 2023).
+
+    This repository uses a clean adaptation of SCRUB's central idea rather than
+    a bit-for-bit recreation of the authors' notebook code. The original
+    trained model is copied and frozen as the teacher, while a student
+    initialised from the same checkpoint is updated to:
+
+    * stay close to the teacher on ``D_r`` via temperature-scaled KL
+      distillation plus optional retain-label cross-entropy; and
+    * move away from the teacher on ``D_f`` via a negative KL term.
+
+    To keep the implementation easy to compare with the existing baselines and
+    easy to explain in a dissertation, we alternate a forget pass and a retain
+    pass within each epoch, then snapshot/evaluate exactly as for GA and
+    SalUn. This preserves SCRUB's retain-preservation / forget-divergence
+    structure while fitting the repository's existing baseline interface.
+    """
+
+    lr: float = 5e-4
+    epochs: int = 5
+    alpha: float = 1.0
+    beta: float = 1.0
+    gamma: float = 1.0
+    temperature: float = 2.0
+    weight_decay: float = 1e-4
+    batch_size: Optional[int] = None
+    grad_clip_norm: Optional[float] = 1.0
+    freeze_bn: bool = True
+
+
 def _save_snapshot(model: nn.Module, snapshot_dir: Optional[str], epoch: int) -> Optional[str]:
     if snapshot_dir is None:
         return None
@@ -150,41 +185,89 @@ def _set_bn_eval(model: nn.Module) -> None:
             module.eval()
 
 
+def _freeze_model(model: nn.Module) -> None:
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+
+
+def _distill_kl(student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    if temperature <= 0.0:
+        raise ValueError(f"temperature must be positive, got {temperature}")
+
+    student_logits = student_logits.float()
+    teacher_logits = teacher_logits.float()
+    log_probs_student = F.log_softmax(student_logits / temperature, dim=1)
+    probs_teacher = F.softmax(teacher_logits / temperature, dim=1)
+    return F.kl_div(log_probs_student, probs_teacher, reduction="batchmean") * (temperature ** 2)
+
+
+def _optimizer_step_with_optional_clip(
+    loss: torch.Tensor,
+    optimizer: optim.Optimizer,
+    scaler: torch.cuda.amp.GradScaler,
+    amp,
+    parameters,
+    grad_clip_norm: Optional[float],
+) -> None:
+    if amp.use_grad_scaler:
+        scaler.scale(loss).backward()
+        if grad_clip_norm is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(parameters, max_norm=grad_clip_norm)
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        loss.backward()
+        if grad_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(parameters, max_norm=grad_clip_norm)
+        optimizer.step()
+
+
 def estimate_empirical_fisher_diag(
     model: nn.Module,
     loader,
     criterion: nn.Module,
     device: torch.device,
     max_batches: int,
+    samples_per_batch: Optional[int] = None,
 ) -> Dict[str, torch.Tensor]:
     params_named = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
     fisher = {name: torch.zeros_like(param, device=device) for name, param in params_named}
 
     model.eval()
-    n_batches = 0
+    n_samples = 0
     for batch_idx, (inputs, labels) in enumerate(loader):
         if batch_idx >= max_batches:
             break
         inputs = inputs.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        model.zero_grad(set_to_none=True)
         logits = model(inputs)
-        loss = criterion(logits, labels)
-        grads = torch.autograd.grad(
-            loss,
-            [param for _, param in params_named],
-            retain_graph=False,
-            create_graph=False,
-        )
-        for (name, _), grad in zip(params_named, grads):
-            fisher[name] += grad.detach() ** 2
-        n_batches += 1
+        losses = F.cross_entropy(logits, labels, reduction="none")
 
-    if n_batches == 0:
+        batch_size = int(labels.shape[0])
+        if samples_per_batch is None or samples_per_batch >= batch_size:
+            selected_indices = range(batch_size)
+        else:
+            selected_indices = range(samples_per_batch)
+
+        selected_count = len(selected_indices)
+        for sample_pos, sample_idx in enumerate(selected_indices):
+            grads = torch.autograd.grad(
+                losses[sample_idx],
+                [param for _, param in params_named],
+                retain_graph=sample_pos < selected_count - 1,
+                create_graph=False,
+            )
+            for (name, _), grad in zip(params_named, grads):
+                fisher[name] += grad.detach() ** 2
+            n_samples += 1
+
+    if n_samples == 0:
         raise RuntimeError("No batches processed for Fisher estimation.")
     for name in fisher:
-        fisher[name] /= float(n_batches)
+        fisher[name] /= float(n_samples)
     return fisher
 
 
@@ -214,6 +297,7 @@ def _estimate_ssd_fishers(
     criterion: nn.Module,
     device: torch.device,
     fisher_batches: int,
+    fisher_samples_per_batch: Optional[int] = None,
     selection_basis: str = "retain",
 ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """Return ``(I_forget, I_ref)`` where ``I_ref`` is the reference Fisher.
@@ -222,8 +306,22 @@ def _estimate_ssd_fishers(
     """
     max_forget_batches = min(fisher_batches, len(forget_loader))
     max_retain_batches = min(fisher_batches, len(retain_loader))
-    fisher_forget = estimate_empirical_fisher_diag(model, forget_loader, criterion, device, max_forget_batches)
-    fisher_retain = estimate_empirical_fisher_diag(model, retain_loader, criterion, device, max_retain_batches)
+    fisher_forget = estimate_empirical_fisher_diag(
+        model,
+        forget_loader,
+        criterion,
+        device,
+        max_forget_batches,
+        samples_per_batch=fisher_samples_per_batch,
+    )
+    fisher_retain = estimate_empirical_fisher_diag(
+        model,
+        retain_loader,
+        criterion,
+        device,
+        max_retain_batches,
+        samples_per_batch=fisher_samples_per_batch,
+    )
 
     if selection_basis == "retain":
         return fisher_forget, fisher_retain
@@ -462,9 +560,10 @@ def run_ssd_unlearning(
         criterion,
         device,
         config.fisher_batches,
+        fisher_samples_per_batch=config.fisher_samples_per_batch,
         selection_basis=config.selection_basis,
     )
-    _apply_ssd_dampening(model, fisher_forget, fisher_ref, config)
+    diagnostics = _apply_ssd_dampening(model, fisher_forget, fisher_ref, config)
 
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
@@ -472,7 +571,12 @@ def run_ssd_unlearning(
     if path is not None:
         snapshot_paths.append(path)
 
-    return {"model": model, "classwise_history": history, "snapshot_paths": snapshot_paths}
+    return {
+        "model": model,
+        "classwise_history": history,
+        "snapshot_paths": snapshot_paths,
+        "diagnostics": diagnostics,
+    }
 
 
 def run_salun_unlearning(
@@ -598,6 +702,144 @@ def run_salun_unlearning(
     return {"model": model, "classwise_history": history, "snapshot_paths": snapshot_paths}
 
 
+def run_scrub_unlearning(
+    model: nn.Module,
+    forget_loader,
+    retain_loader,
+    testloader,
+    device: torch.device,
+    config: Optional[SCRUBConfig] = None,
+    num_classes: int = 10,
+    snapshot_dir: Optional[str] = None,
+    teacher_model: Optional[nn.Module] = None,
+):
+    """SCRUB teacher-student unlearning adapted to this repository.
+
+    The student is updated while the teacher is frozen. Each epoch alternates:
+
+    1. a forget pass that *maximises* student-teacher KL divergence on
+       ``D_f`` by minimising ``-beta * KL_T``; and
+    2. a retain pass that *minimises* ``alpha * KL_T + gamma * CE`` on
+       ``D_r``.
+
+    This is a faithful implementation of SCRUB's retain-preservation /
+    forget-divergence idea, adapted to the repository's per-epoch snapshot
+    interface rather than the original authors' notebook training harness.
+    """
+    config = config or SCRUBConfig()
+    if retain_loader is None:
+        raise ValueError("SCRUB requires a retain_loader.")
+    if teacher_model is model:
+        raise ValueError("teacher_model must be distinct from the student model.")
+
+    amp = build_amp_config(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
+    trainable_params = [param for param in model.parameters() if param.requires_grad]
+
+    teacher = copy.deepcopy(model) if teacher_model is None else teacher_model
+    teacher.to(device)
+    _freeze_model(teacher)
+
+    history: List[np.ndarray] = []
+    snapshot_paths: List[str] = []
+    diagnostics: List[Dict[str, float]] = []
+
+    initial = _save_snapshot(model, snapshot_dir, 0)
+    if initial is not None:
+        snapshot_paths.append(initial)
+    _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
+    history.append(per_class)
+
+    for epoch in range(1, config.epochs + 1):
+        model.train()
+        if config.freeze_bn:
+            _set_bn_eval(model)
+
+        forget_kl_sum = 0.0
+        forget_batches = 0
+        for inputs, _labels in forget_loader:
+            inputs = inputs.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+
+            with torch.autocast(device_type="cuda", dtype=amp.dtype, enabled=amp.enabled):
+                student_logits = model(inputs)
+                with torch.no_grad():
+                    teacher_logits = teacher(inputs)
+                forget_kl = _distill_kl(student_logits, teacher_logits, config.temperature)
+                loss = -config.beta * forget_kl
+
+            if not torch.isfinite(loss.detach()):
+                raise RuntimeError(f"Non-finite SCRUB forget loss at epoch {epoch}.")
+            _optimizer_step_with_optional_clip(
+                loss,
+                optimizer,
+                scaler,
+                amp,
+                trainable_params,
+                config.grad_clip_norm,
+            )
+            forget_kl_sum += float(forget_kl.detach().item())
+            forget_batches += 1
+
+        model.train()
+        if config.freeze_bn:
+            _set_bn_eval(model)
+
+        retain_kl_sum = 0.0
+        retain_ce_sum = 0.0
+        retain_batches = 0
+        for inputs, labels in retain_loader:
+            inputs = inputs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+
+            with torch.autocast(device_type="cuda", dtype=amp.dtype, enabled=amp.enabled):
+                student_logits = model(inputs)
+                with torch.no_grad():
+                    teacher_logits = teacher(inputs)
+                retain_kl = _distill_kl(student_logits, teacher_logits, config.temperature)
+                retain_ce = criterion(student_logits.float(), labels)
+                loss = config.alpha * retain_kl + config.gamma * retain_ce
+
+            if not torch.isfinite(loss.detach()):
+                raise RuntimeError(f"Non-finite SCRUB retain loss at epoch {epoch}.")
+            _optimizer_step_with_optional_clip(
+                loss,
+                optimizer,
+                scaler,
+                amp,
+                trainable_params,
+                config.grad_clip_norm,
+            )
+            retain_kl_sum += float(retain_kl.detach().item())
+            retain_ce_sum += float(retain_ce.detach().item())
+            retain_batches += 1
+
+        diagnostics.append(
+            {
+                "epoch": float(epoch),
+                "forget_kl": forget_kl_sum / float(max(forget_batches, 1)),
+                "retain_kl": retain_kl_sum / float(max(retain_batches, 1)),
+                "retain_ce": retain_ce_sum / float(max(retain_batches, 1)),
+            }
+        )
+
+        _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
+        history.append(per_class)
+        path = _save_snapshot(model, snapshot_dir, epoch)
+        if path is not None:
+            snapshot_paths.append(path)
+
+    return {
+        "model": model,
+        "classwise_history": history,
+        "snapshot_paths": snapshot_paths,
+        "diagnostics": diagnostics,
+    }
+
+
 def run_ga_snapshots(
     model_factory: Callable[[], nn.Module],
     original_checkpoint_path: str,
@@ -669,6 +911,35 @@ def run_salun_snapshots(
     model = model_factory()
     model.load_state_dict(torch.load(original_checkpoint_path, map_location=device))
     result = run_salun_unlearning(
+        model,
+        forget_loader,
+        retain_loader,
+        testloader,
+        device,
+        config=config,
+        num_classes=num_classes,
+        snapshot_dir=snapshot_dir,
+    )
+    if final_checkpoint_path is not None:
+        torch.save(result["model"].state_dict(), final_checkpoint_path)
+    return snapshot_dir
+
+
+def run_scrub_snapshots(
+    model_factory: Callable[[], nn.Module],
+    original_checkpoint_path: str,
+    forget_loader,
+    retain_loader,
+    testloader,
+    device: torch.device,
+    snapshot_dir: str,
+    final_checkpoint_path: Optional[str] = None,
+    config: Optional[SCRUBConfig] = None,
+    num_classes: int = 10,
+) -> str:
+    model = model_factory()
+    model.load_state_dict(torch.load(original_checkpoint_path, map_location=device))
+    result = run_scrub_unlearning(
         model,
         forget_loader,
         retain_loader,
