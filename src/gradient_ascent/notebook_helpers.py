@@ -77,16 +77,14 @@ def build_default_core_config(
     use_bf16: bool = False,
 ) -> CoreExperimentConfig:
     """Return the notebook's default baseline configuration bundle."""
-    # GA now uses a somewhat higher learning rate but fewer epochs. The method
-    # is still plain gradient ascent on the forget set; the goal here is to hit
-    # the target class harder early on while reducing how long forget-only
-    # updates have to spread collateral damage across the retained classes.
+    # Keep GA close to the naive forget-only baseline: full passes over the
+    # forget loader, no BatchNorm freezing, and no gradient clipping.
     ga_config = GAConfig(
-        lr=8e-5,
-        epochs=10,
-        max_batches_per_epoch=12,
-        freeze_bn=True,
-        grad_clip_norm=7.5,
+        lr=1.1e-4,
+        epochs=6,
+        max_batches_per_epoch=None,
+        freeze_bn=False,
+        grad_clip_norm=None,
     )
     # For SSD we want stronger forgetting on the target class without turning
     # the one-shot dampening step into broad collateral damage. The preset below
@@ -101,21 +99,21 @@ def build_default_core_config(
         fisher_samples_per_batch=64,
         selection_basis="retain",
     )
-    # The earlier SCRUB preset still behaved too much like "break it once, then
-    # let it bounce back". This preset keeps one short stronger scrub epoch,
-    # then continues with a very small residual forget signal during recovery so
-    # the forgotten class does not immediately snap back while the retain set is
-    # being recovered.
+    # The forget-side SCRUB objective now pushes forgotten examples toward an
+    # uninformative prediction rather than toward an arbitrary wrong class. The
+    # preset below pairs that with a short scrub phase and a light residual
+    # forget signal during recovery, so the target class stays suppressed more
+    # smoothly without causing large spikes in unrelated classes.
     scrub_config = SCRUBConfig(
         lr=5e-5,
-        epochs=12,
-        forget_phase_epochs=1,
-        max_forget_batches_per_epoch=4,
-        recovery_beta_scale=0.1,
+        epochs=10,
+        forget_phase_epochs=2,
+        max_forget_batches_per_epoch=3,
+        recovery_beta_scale=0.15,
         recovery_max_forget_batches_per_epoch=1,
-        alpha=4.0,
-        beta=0.15,
-        gamma=4.0,
+        alpha=3.0,
+        beta=0.4,
+        gamma=3.0,
         temperature=2.0,
         weight_decay=1e-4,
         grad_clip_norm=0.5,

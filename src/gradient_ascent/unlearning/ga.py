@@ -21,30 +21,13 @@ class GAConfig:
     retain set is consulted. This is the definition used in e.g. Thudi et al.
     (2022) and the NegGrad baseline of Golatkar et al. (2020); there is no
     regularisation, no retain-side loss and no masking.
-
-    ``freeze_bn`` keeps every BatchNorm layer in eval mode throughout GA so
-    ``running_mean`` / ``running_var`` are not EMA-updated from forget-only
-    batches. With PyTorch's default BN momentum 0.1 and O(10^2) steps on a
-    single-class forget set the original buffers would otherwise be
-    essentially overwritten by forget-class statistics, and subsequent
-    ``evaluate()`` calls (which use eval-mode BN) would then read corrupted
-    stats on *every* class. Weights still receive gradient updates; only the
-    running buffers are frozen, so this is a measurement fix, not a change
-    to the GA update rule itself.
-
-    ``grad_clip_norm`` bounds the per-step update. Vanilla ``-CE`` is
-    unbounded above, so once the model mis-classifies the forget class
-    confidently the gradient norm grows without limit and GA diverges. A
-    global L2 clip preserves the gradient ascent direction while preventing
-    runaway steps; set to ``None`` to recover the unclipped Thudi et al.
-    update.
     """
 
     lr: float = 3e-6
     epochs: int = 10
-    max_batches_per_epoch: Optional[int] = 6
-    freeze_bn: bool = True
-    grad_clip_norm: Optional[float] = 1.0
+    max_batches_per_epoch: Optional[int] = None
+    freeze_bn: bool = False
+    grad_clip_norm: Optional[float] = None
 
 
 def run_ga_unlearning(

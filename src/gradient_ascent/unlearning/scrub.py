@@ -31,7 +31,8 @@ class SCRUBConfig:
 
     * stay close to the teacher on ``D_r`` via temperature-scaled KL
       distillation plus optional retain-label cross-entropy; and
-    * move away from the teacher on ``D_f`` via a negative KL term.
+    * move away from the teacher on ``D_f`` by making the student's logits
+      deliberately uninformative on forget examples.
 
     To keep the implementation easy to compare with the existing baselines and
     easy to explain in a dissertation, we use a paired-batch objective during a
@@ -39,13 +40,18 @@ class SCRUBConfig:
     and the update minimises
 
     ``alpha * KL(student_r || teacher_r) + gamma * CE(student_r, y_r)
-      - beta * KL(student_f || teacher_f)``.
+      + beta * KL(U || student_f)``.
 
-    After that, the student enters a recovery phase where the forget term is not
-    removed entirely, but reduced sharply. This avoids the failure mode where a
-    single destructive scrub step is immediately undone by pure retain-only
-    training, while still keeping later epochs much more retain-focused than the
-    initial scrub phase.
+    Here ``U`` is the uniform class distribution. Using a uniform forget target
+    gives a more controlled "be uncertain on forgotten data" signal than a raw
+    negative teacher-KL term, which in practice can make the model latch onto an
+    arbitrary wrong class and produce erratic spikes in unrelated classes.
+
+    After that, the student enters a recovery phase where the forget term is
+    not removed entirely, but reduced sharply. This avoids the failure mode
+    where a single destructive scrub step is immediately undone by pure
+    retain-only training, while still keeping later epochs much more
+    retain-focused than the initial scrub phase.
     """
 
     lr: float = 5e-4
@@ -67,6 +73,18 @@ class SCRUBConfig:
 
 def _build_scrub_optimizer(model: nn.Module, config: SCRUBConfig):
     return optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+
+
+def _uniform_kl(student_logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    if temperature <= 0.0:
+        raise ValueError(f"temperature must be positive, got {temperature}")
+
+    student_logits = student_logits.float()
+    log_probs_student = torch.log_softmax(student_logits / temperature, dim=1)
+    num_classes = int(student_logits.shape[1])
+    uniform_probs = torch.full_like(student_logits, 1.0 / float(num_classes))
+    # F.kl_div(log q, p) computes KL(p || q), so this is KL(U || student).
+    return torch.nn.functional.kl_div(log_probs_student, uniform_probs, reduction="batchmean") * (temperature ** 2)
 
 
 def run_scrub_unlearning(
@@ -154,10 +172,9 @@ def run_scrub_unlearning(
                     student_forget_logits = model(forget_inputs)
                     student_retain_logits = model(retain_inputs)
                     with torch.no_grad():
-                        teacher_forget_logits = teacher(forget_inputs)
                         teacher_retain_logits = teacher(retain_inputs)
 
-                    forget_kl = _distill_kl(student_forget_logits, teacher_forget_logits, config.temperature)
+                    forget_kl = _uniform_kl(student_forget_logits, config.temperature)
                     retain_kl = _distill_kl(student_retain_logits, teacher_retain_logits, config.temperature)
                     retain_ce = criterion(student_retain_logits.float(), retain_labels)
                     loss = (
