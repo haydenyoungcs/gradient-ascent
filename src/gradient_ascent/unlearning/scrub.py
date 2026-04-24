@@ -50,6 +50,7 @@ class SCRUBConfig:
     lr: float = 5e-4
     epochs: int = 5
     forget_phase_epochs: int = 2
+    max_forget_batches_per_epoch: Optional[int] = None
     alpha: float = 1.0
     beta: float = 1.0
     gamma: float = 1.0
@@ -126,7 +127,12 @@ def run_scrub_unlearning(
         retain_batches = 0
 
         if in_forget_phase:
-            for forget_inputs, _forget_labels in forget_loader:
+            for batch_idx, (forget_inputs, _forget_labels) in enumerate(forget_loader):
+                if (
+                    config.max_forget_batches_per_epoch is not None
+                    and batch_idx >= config.max_forget_batches_per_epoch
+                ):
+                    break
                 retain_inputs, retain_labels = next(retain_iter)
                 forget_inputs = forget_inputs.to(device, non_blocking=True)
                 retain_inputs = retain_inputs.to(device, non_blocking=True)

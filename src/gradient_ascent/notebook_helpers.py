@@ -76,45 +76,46 @@ def build_default_core_config(
     use_bf16: bool = False,
 ) -> CoreExperimentConfig:
     """Return the notebook's default baseline configuration bundle."""
-    # GA now uses a deliberately stronger schedule. The method is still plain
-    # gradient ascent on the forget set, but we let it see every forget batch
-    # each epoch, run for longer, and take slightly larger steps so the
-    # forgetting effect is strong enough to be clearly visible without making
-    # the non-forget classes noticeably less stable.
+    # GA now uses a sharper but shorter schedule. The method is still plain
+    # gradient ascent on the forget set, but instead of a long run over every
+    # forget batch each epoch, we take somewhat larger steps for fewer capped
+    # updates. In practice this tends to damage the target class more directly
+    # while reducing the slow collateral drift on the retained classes.
     ga_config = GAConfig(
-        lr=3.25e-5,
-        epochs=25,
-        max_batches_per_epoch=None,
+        lr=6e-5,
+        epochs=14,
+        max_batches_per_epoch=12,
         freeze_bn=True,
-        grad_clip_norm=10.0,
+        grad_clip_norm=7.5,
     )
-    # SSD is currently the strongest-looking baseline in this project, so the
-    # default notebook preset only nudges it slightly toward stronger
-    # forgetting: a somewhat lower selection threshold and a slightly stronger
-    # dampening factor. This keeps the change easy to explain as mild
-    # hyperparameter tuning of the same one-shot SSD rule.
+    # SSD can become effectively a no-op if the selection threshold is a little
+    # too strict for the current checkpoint, so the notebook preset keeps the
+    # same one-shot rule but uses a slightly more permissive threshold to make
+    # sure some forget-dominated parameters are actually selected and damped.
     ssd_config = SSDConfig(
-        alpha=8.0,
-        lambda_=0.9,
+        alpha=6.5,
+        lambda_=0.85,
         eps=1e-12,
         fisher_batches=100,
         fisher_samples_per_batch=32,
         selection_basis="retain",
     )
-    # The earlier SCRUB preset kept applying forget pressure for too long, which
-    # damaged many retained classes. The revised preset uses a short initial
-    # scrub phase followed by retain-only recovery, together with slightly
-    # gentler updates and stronger retain preservation.
+    # The earlier SCRUB preset still hit the model too hard in the initial
+    # forget phase, producing unrealistic collapses before recovery. This
+    # notebook preset keeps the same teacher-student idea but makes the scrub
+    # phase much shorter and smaller, then gives the retain-only recovery phase
+    # more room to stabilise the non-forget classes.
     scrub_config = SCRUBConfig(
-        lr=8e-5,
-        epochs=10,
-        forget_phase_epochs=2,
-        alpha=3.0,
-        beta=0.3,
-        gamma=3.0,
+        lr=5e-5,
+        epochs=12,
+        forget_phase_epochs=1,
+        max_forget_batches_per_epoch=6,
+        alpha=4.0,
+        beta=0.15,
+        gamma=4.0,
         temperature=2.0,
         weight_decay=1e-4,
-        grad_clip_norm=0.75,
+        grad_clip_norm=0.5,
     )
     return CoreExperimentConfig(
         num_classes=num_classes,
@@ -144,6 +145,7 @@ def build_core_wandb_config(config: CoreExperimentConfig) -> dict[str, object]:
         "scrub_lr": config.scrub_config.lr,
         "scrub_epochs": config.scrub_config.epochs,
         "scrub_forget_phase_epochs": config.scrub_config.forget_phase_epochs,
+        "scrub_max_forget_batches_per_epoch": config.scrub_config.max_forget_batches_per_epoch,
         "scrub_alpha": config.scrub_config.alpha,
         "scrub_beta": config.scrub_config.beta,
         "scrub_gamma": config.scrub_config.gamma,
@@ -507,46 +509,58 @@ def save_scrub_diagnostics(
         writer.writerows(rows)
 
     plot_path = Path(runtime.out_dir) / "scrub_diagnostics.png"
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
     epochs = [row["epoch"] for row in rows]
 
-    axes[0, 0].plot(epochs, [row["forget_kl"] for row in rows], marker="o", linewidth=2)
-    axes[0, 0].set_title("SCRUB forget KL to teacher")
-    axes[0, 0].set_xlabel("Unlearning step")
-    axes[0, 0].set_ylabel("KL")
-    axes[0, 0].grid(alpha=0.3)
+    phase_boundary = runtime.core_config.scrub_config.forget_phase_epochs + 0.5
 
-    axes[0, 1].plot(epochs, [row["retain_kl"] for row in rows], marker="o", linewidth=2)
-    axes[0, 1].set_title("SCRUB retain KL to teacher")
-    axes[0, 1].set_xlabel("Unlearning step")
-    axes[0, 1].set_ylabel("KL")
-    axes[0, 1].grid(alpha=0.3)
-
-    axes[1, 0].plot(epochs, [row["retain_ce"] for row in rows], marker="o", linewidth=2)
-    axes[1, 0].set_title("SCRUB retain cross-entropy")
-    axes[1, 0].set_xlabel("Unlearning step")
-    axes[1, 0].set_ylabel("Cross-entropy")
-    axes[1, 0].grid(alpha=0.3)
-
-    axes[1, 1].plot(
+    axes[0].plot(
         epochs,
         [100.0 * row["retain_acc"] for row in rows],
         marker="o",
         linewidth=2,
         label="retain accuracy",
     )
-    axes[1, 1].plot(
+    axes[0].plot(
         epochs,
         [100.0 * row["forget_acc"] for row in rows],
         marker="s",
         linewidth=2,
         label="forget accuracy",
     )
-    axes[1, 1].set_title("SCRUB student accuracy on retain/forget sets")
-    axes[1, 1].set_xlabel("Unlearning step")
-    axes[1, 1].set_ylabel("Accuracy (%)")
-    axes[1, 1].grid(alpha=0.3)
-    axes[1, 1].legend()
+    axes[0].axvline(phase_boundary, color="black", linestyle="--", linewidth=1, alpha=0.7)
+    axes[0].set_title("SCRUB retain vs forget accuracy")
+    axes[0].set_xlabel("Unlearning step")
+    axes[0].set_ylabel("Accuracy (%)")
+    axes[0].set_ylim(0, 100)
+    axes[0].grid(alpha=0.3)
+    axes[0].legend()
+
+    forget_kl = np.array([row["forget_kl"] for row in rows], dtype=np.float64)
+    retain_kl = np.array([row["retain_kl"] for row in rows], dtype=np.float64)
+    eps = 1e-8
+    axes[1].plot(
+        epochs,
+        np.maximum(forget_kl, eps),
+        marker="o",
+        linewidth=2,
+        label="forget KL",
+    )
+    axes[1].plot(
+        epochs,
+        np.maximum(retain_kl, eps),
+        marker="s",
+        linewidth=2,
+        label="retain KL",
+    )
+    axes[1].axvline(phase_boundary, color="black", linestyle="--", linewidth=1, alpha=0.7)
+    axes[1].set_yscale("log")
+    axes[1].set_title("SCRUB divergence from teacher")
+    axes[1].set_xlabel("Unlearning step")
+    axes[1].set_ylabel("KL (log scale)")
+    axes[1].grid(alpha=0.3)
+    axes[1].legend()
+
     fig.savefig(plot_path, dpi=180)
     plt.close(fig)
 

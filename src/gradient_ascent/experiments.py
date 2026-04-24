@@ -174,12 +174,17 @@ def _save_classwise_artifacts(
         percent_plot_path,
         f"Relative Change in Class Accuracy During Unlearning ({algorithm_label}, ResNet-{config.model_depth})",
     )
+    secondary_title = (
+        f"Relative Change in Class Accuracy During Unlearning ({algorithm_label}, ResNet-{config.model_depth})"
+        if len(epochs) > 3
+        else f"Absolute Class Accuracy During Unlearning ({algorithm_label}, ResNet-{config.model_depth})"
+    )
     save_classwise_absolute_accuracy_plot(
         epochs,
         history_tensor,
         CIFAR10_CLASSES,
         absolute_plot_path,
-        f"Absolute Class Accuracy During Unlearning ({algorithm_label}, ResNet-{config.model_depth})",
+        secondary_title,
     )
 
     snapshot_dir = f"{config.out_dir}/unlearning_snapshots_{algorithm_key}"

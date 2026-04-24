@@ -197,6 +197,9 @@ def save_classwise_absolute_accuracy_plot(
 ) -> str:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     history = 100.0 * np.asarray(history, dtype=np.float64)
+    initial_acc = history[0]
+    denom = np.where(initial_acc == 0, 1e-12, initial_acc)
+    percent_change = 100.0 * (history - initial_acc) / denom
 
     final_acc = history[-1]
     initial_acc = history[0]
@@ -209,12 +212,12 @@ def save_classwise_absolute_accuracy_plot(
     if len(epochs) > 3:
         fig, ax = plt.subplots(1, 1, figsize=(10, 6), constrained_layout=True)
         for class_idx, class_name in enumerate(class_names):
-            ax.plot(epochs, history[:, class_idx], label=class_name)
+            ax.plot(epochs, percent_change[:, class_idx], label=class_name)
 
         ax.set_xlabel("Unlearning step")
-        ax.set_ylabel("Class accuracy (%)")
+        ax.set_ylabel("Accuracy change (%)")
         ax.set_title(title)
-        ax.set_ylim(0, 100)
+        ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
         ax.legend(loc="lower left", fontsize="small", ncol=2)
         ax.grid(alpha=0.3)
     else:
