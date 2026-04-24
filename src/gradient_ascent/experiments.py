@@ -23,14 +23,15 @@ from .reporting import (
     save_mia_trajectory_csv,
     save_similarity_trajectory_csv,
 )
-from .certified import CertifiedConfig, run_certified_unlearning
 from .trajectories import compute_epoch_rows_from_snapshots, save_combined_similarity_mia_plot, save_similarity_heatmap_grid
 from .training import evaluate, train_model
 from .unlearning import (
+    CertifiedConfig,
     GAConfig,
     SCRUBConfig,
     SSDConfig,
     SalUnConfig,
+    run_certified_unlearning,
     run_ga_unlearning,
     run_salun_unlearning,
     run_scrub_unlearning,

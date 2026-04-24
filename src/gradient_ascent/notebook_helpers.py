@@ -78,10 +78,11 @@ def build_default_core_config(
     """Return the notebook's default baseline configuration bundle."""
     # GA now uses a deliberately stronger schedule. The method is still plain
     # gradient ascent on the forget set, but we let it see every forget batch
-    # each epoch, run for longer, and take larger steps so the forgetting
-    # effect is strong enough to be clearly visible.
+    # each epoch, run for longer, and take slightly larger steps so the
+    # forgetting effect is strong enough to be clearly visible without making
+    # the non-forget classes noticeably less stable.
     ga_config = GAConfig(
-        lr=3e-5,
+        lr=3.25e-5,
         epochs=25,
         max_batches_per_epoch=None,
         freeze_bn=True,
@@ -100,18 +101,20 @@ def build_default_core_config(
         fisher_samples_per_batch=32,
         selection_basis="retain",
     )
-    # The earlier SCRUB preset was too destructive: many retained classes lost
-    # a lot of accuracy. The revised preset is more retain-focused and gentler
-    # per update, while still preserving the same teacher-student KL idea.
+    # The earlier SCRUB preset kept applying forget pressure for too long, which
+    # damaged many retained classes. The revised preset uses a short initial
+    # scrub phase followed by retain-only recovery, together with slightly
+    # gentler updates and stronger retain preservation.
     scrub_config = SCRUBConfig(
-        lr=1e-4,
-        epochs=8,
-        alpha=2.0,
-        beta=0.4,
-        gamma=2.0,
+        lr=8e-5,
+        epochs=10,
+        forget_phase_epochs=2,
+        alpha=3.0,
+        beta=0.3,
+        gamma=3.0,
         temperature=2.0,
         weight_decay=1e-4,
-        grad_clip_norm=1.0,
+        grad_clip_norm=0.75,
     )
     return CoreExperimentConfig(
         num_classes=num_classes,
@@ -140,6 +143,7 @@ def build_core_wandb_config(config: CoreExperimentConfig) -> dict[str, object]:
         "ssd_fisher_batches": config.ssd_config.fisher_batches,
         "scrub_lr": config.scrub_config.lr,
         "scrub_epochs": config.scrub_config.epochs,
+        "scrub_forget_phase_epochs": config.scrub_config.forget_phase_epochs,
         "scrub_alpha": config.scrub_config.alpha,
         "scrub_beta": config.scrub_config.beta,
         "scrub_gamma": config.scrub_config.gamma,

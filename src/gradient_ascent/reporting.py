@@ -169,51 +169,19 @@ def save_classwise_percent_change_plot(
     final_change = percent_change[-1]
     order = np.argsort(final_change)
     ordered_classes = [class_names[idx] for idx in order]
-    ordered_percent_change = percent_change[:, order].T
     ordered_final_change = final_change[order]
-
-    vmax = float(np.max(np.abs(percent_change)))
-    if vmax == 0.0:
-        vmax = 1.0
-
-    fig, (ax_heatmap, ax_bar) = plt.subplots(
-        1,
-        2,
-        figsize=(14, 6),
-        constrained_layout=True,
-        gridspec_kw={"width_ratios": [3.4, 1.2]},
-    )
-
-    extent = [float(epochs[0]) - 0.5, float(epochs[-1]) + 0.5, -0.5, len(class_names) - 0.5]
-    im = ax_heatmap.imshow(
-        ordered_percent_change,
-        aspect="auto",
-        cmap="RdBu_r",
-        vmin=-vmax,
-        vmax=vmax,
-        extent=extent,
-        origin="lower",
-        interpolation="nearest",
-    )
-    ax_heatmap.set_title(title)
-    ax_heatmap.set_xlabel("Unlearning step")
-    ax_heatmap.set_ylabel("Class")
-    ax_heatmap.set_xticks(list(epochs))
-    ax_heatmap.set_yticks(range(len(ordered_classes)))
-    ax_heatmap.set_yticklabels(ordered_classes)
-
-    cbar = fig.colorbar(im, ax=ax_heatmap, fraction=0.046, pad=0.04)
-    cbar.set_label("Relative accuracy change (%)")
-
     y_pos = np.arange(len(ordered_classes))
     colors = ["#c44e52" if val < 0 else "#4c72b0" for val in ordered_final_change]
-    ax_bar.barh(y_pos, ordered_final_change, color=colors)
-    ax_bar.axvline(0, color="black", linestyle="--", linewidth=0.8)
-    ax_bar.set_title("Final step")
-    ax_bar.set_xlabel("Change (%)")
-    ax_bar.set_yticks(y_pos)
-    ax_bar.set_yticklabels([])
-    ax_bar.grid(axis="x", alpha=0.3)
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 7), constrained_layout=True)
+    ax.barh(y_pos, ordered_final_change, color=colors)
+    ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
+    ax.set_title(title)
+    ax.set_xlabel("Accuracy change (%)")
+    ax.set_ylabel("Class")
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(ordered_classes)
+    ax.grid(axis="x", alpha=0.3)
 
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
@@ -235,48 +203,33 @@ def save_classwise_absolute_accuracy_plot(
     delta = final_acc - initial_acc
     order = np.argsort(final_acc)
     ordered_classes = [class_names[idx] for idx in order]
-    ordered_history = history[:, order].T
     ordered_final_acc = final_acc[order]
     ordered_delta = delta[order]
 
-    fig, (ax_heatmap, ax_bar) = plt.subplots(
-        1,
-        2,
-        figsize=(14, 6),
-        constrained_layout=True,
-        gridspec_kw={"width_ratios": [3.4, 1.2]},
-    )
+    if len(epochs) > 3:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6), constrained_layout=True)
+        for class_idx, class_name in enumerate(class_names):
+            ax.plot(epochs, history[:, class_idx], label=class_name)
 
-    extent = [float(epochs[0]) - 0.5, float(epochs[-1]) + 0.5, -0.5, len(class_names) - 0.5]
-    im = ax_heatmap.imshow(
-        ordered_history,
-        aspect="auto",
-        cmap="viridis",
-        vmin=0.0,
-        vmax=100.0,
-        extent=extent,
-        origin="lower",
-        interpolation="nearest",
-    )
-    ax_heatmap.set_title(title)
-    ax_heatmap.set_xlabel("Unlearning step")
-    ax_heatmap.set_ylabel("Class")
-    ax_heatmap.set_xticks(list(epochs))
-    ax_heatmap.set_yticks(range(len(ordered_classes)))
-    ax_heatmap.set_yticklabels(ordered_classes)
+        ax.set_xlabel("Unlearning step")
+        ax.set_ylabel("Class accuracy (%)")
+        ax.set_title(title)
+        ax.set_ylim(0, 100)
+        ax.legend(loc="lower left", fontsize="small", ncol=2)
+        ax.grid(alpha=0.3)
+    else:
+        y_pos = np.arange(len(ordered_classes))
+        colors = ["#c44e52" if val < 0 else "#4c72b0" for val in ordered_delta]
 
-    cbar = fig.colorbar(im, ax=ax_heatmap, fraction=0.046, pad=0.04)
-    cbar.set_label("Class accuracy (%)")
-
-    y_pos = np.arange(len(ordered_classes))
-    colors = ["#c44e52" if val < 0 else "#4c72b0" for val in ordered_delta]
-    ax_bar.barh(y_pos, ordered_final_acc, color=colors)
-    ax_bar.set_title("Final step")
-    ax_bar.set_xlabel("Accuracy (%)")
-    ax_bar.set_xlim(0, 100)
-    ax_bar.set_yticks(y_pos)
-    ax_bar.set_yticklabels([])
-    ax_bar.grid(axis="x", alpha=0.3)
+        fig, ax = plt.subplots(1, 1, figsize=(12, 7), constrained_layout=True)
+        ax.barh(y_pos, ordered_final_acc, color=colors)
+        ax.set_title(title)
+        ax.set_xlabel("Accuracy (%)")
+        ax.set_ylabel("Class")
+        ax.set_xlim(0, 100)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(ordered_classes)
+        ax.grid(axis="x", alpha=0.3)
 
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
