@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import time
+import csv
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, Mapping, Optional, Sequence
 
@@ -25,6 +27,7 @@ from .reporting import (
     save_mia_metric_grid_plot,
     save_mia_trajectory_csv,
     save_similarity_trajectory_csv,
+    save_unlearning_runtime_bar_plot,
 )
 from .trajectories import compute_epoch_rows_from_snapshots, save_combined_similarity_mia_plot, save_similarity_heatmap_grid
 from .training import evaluate, train_model
@@ -89,6 +92,9 @@ class CoreExperimentArtifacts:
     retrained_classwise_plot_path: str
     retrained_vs_original_percent_diff_plot_path: str
     algorithm_artifacts: Dict[str, AlgorithmArtifacts]
+    unlearning_runtime_csv_path: str
+    unlearning_runtime_plot_path: str
+    unlearning_runtime_seconds: Dict[str, float]
     summary_metrics: Dict[str, float]
 
 
@@ -311,9 +317,12 @@ def run_core_checkpoints(
         else make_loader(retain_subset, scrub_batch_size, True, num_workers, use_cuda)
     )
 
+    unlearning_runtime_seconds: Dict[str, float] = {}
+
     ga_model = model_factory()
     ga_model.load_state_dict(torch.load(original_path, map_location=device))
     print("[Core] Running GA unlearning...")
+    t0 = time.perf_counter()
     ga_result = run_ga_unlearning(
         ga_model,
         forget_loader,
@@ -323,6 +332,7 @@ def run_core_checkpoints(
         num_classes=config.num_classes,
         snapshot_dir=f"{config.out_dir}/unlearning_snapshots_ga",
     )
+    unlearning_runtime_seconds["ga"] = time.perf_counter() - t0
     torch.save(ga_result["model"].state_dict(), f"{config.out_dir}/unlearned_net.pt")
     torch.save(ga_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_ga.pt")
     print("[Core] GA complete")
@@ -330,6 +340,7 @@ def run_core_checkpoints(
     ssd_model = model_factory()
     ssd_model.load_state_dict(torch.load(original_path, map_location=device))
     print("[Core] Running SSD unlearning...")
+    t0 = time.perf_counter()
     ssd_result = run_ssd_unlearning(
         ssd_model,
         forget_loader,
@@ -340,12 +351,14 @@ def run_core_checkpoints(
         num_classes=config.num_classes,
         snapshot_dir=f"{config.out_dir}/unlearning_snapshots_ssd",
     )
+    unlearning_runtime_seconds["ssd"] = time.perf_counter() - t0
     torch.save(ssd_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_ssd.pt")
     print("[Core] SSD complete")
 
     salun_model = model_factory()
     salun_model.load_state_dict(torch.load(original_path, map_location=device))
     print("[Core] Running SalUn unlearning...")
+    t0 = time.perf_counter()
     salun_result = run_salun_unlearning(
         salun_model,
         forget_loader,
@@ -356,12 +369,14 @@ def run_core_checkpoints(
         num_classes=config.num_classes,
         snapshot_dir=f"{config.out_dir}/unlearning_snapshots_salun",
     )
+    unlearning_runtime_seconds["salun"] = time.perf_counter() - t0
     torch.save(salun_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_salun.pt")
     print("[Core] SalUn complete")
 
     certified_model = model_factory()
     certified_model.load_state_dict(torch.load(original_path, map_location=device))
     print("[Core] Running Certified Removal unlearning...")
+    t0 = time.perf_counter()
     certified_result = run_certified_unlearning(
         certified_model,
         forget_loader,
@@ -372,12 +387,14 @@ def run_core_checkpoints(
         num_classes=config.num_classes,
         snapshot_dir=f"{config.out_dir}/unlearning_snapshots_certified",
     )
+    unlearning_runtime_seconds["certified"] = time.perf_counter() - t0
     torch.save(certified_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_certified.pt")
     print("[Core] Certified Removal complete")
 
     scrub_model = model_factory()
     scrub_model.load_state_dict(torch.load(original_path, map_location=device))
     print("[Core] Running SCRUB unlearning...")
+    t0 = time.perf_counter()
     scrub_result = run_scrub_unlearning(
         scrub_model,
         scrub_forget_loader,
@@ -388,6 +405,7 @@ def run_core_checkpoints(
         num_classes=config.num_classes,
         snapshot_dir=f"{config.out_dir}/unlearning_snapshots_scrub",
     )
+    unlearning_runtime_seconds["scrub"] = time.perf_counter() - t0
     torch.save(scrub_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_scrub.pt")
     print("[Core] SCRUB complete")
 
@@ -411,6 +429,24 @@ def run_core_checkpoints(
             f"plots/classwise_absolute_accuracy_{algorithm_key}",
             artifact.classwise_absolute_plot_path,
         )
+
+    unlearning_runtime_csv_path = f"{config.out_dir}/unlearning_runtime_seconds.csv"
+    with open(unlearning_runtime_csv_path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["algorithm", "seconds"])
+        writer.writeheader()
+        for algorithm_key, seconds in unlearning_runtime_seconds.items():
+            writer.writerow({"algorithm": algorithm_key, "seconds": float(seconds)})
+    unlearning_runtime_plot_path = save_unlearning_runtime_bar_plot(
+        {key.upper(): value for key, value in unlearning_runtime_seconds.items()},
+        f"{config.out_dir}/unlearning_runtime_seconds.png",
+        title=f"Unlearning runtime by algorithm (ResNet-{config.model_depth})",
+    )
+    _log_media(
+        wandb_run,
+        wandb_module,
+        "plots/unlearning_runtime_seconds",
+        unlearning_runtime_plot_path,
+    )
 
     original_overall, original_per = evaluate(original_model, testloader, num_classes=config.num_classes, device=device)
     retrained_overall, retrained_per = evaluate(retrained_model, testloader, num_classes=config.num_classes, device=device)
@@ -473,6 +509,9 @@ def run_core_checkpoints(
         retrained_classwise_plot_path=retrained_classwise_plot_path,
         retrained_vs_original_percent_diff_plot_path=retrained_vs_original_percent_diff_plot_path,
         algorithm_artifacts=algorithm_artifacts,
+        unlearning_runtime_csv_path=unlearning_runtime_csv_path,
+        unlearning_runtime_plot_path=unlearning_runtime_plot_path,
+        unlearning_runtime_seconds={k: float(v) for k, v in unlearning_runtime_seconds.items()},
         summary_metrics=summary_metrics,
     )
 

@@ -385,6 +385,43 @@ def save_mia_control_comparison_plot(
     return out_path
 
 
+def save_unlearning_runtime_bar_plot(
+    runtime_seconds_by_algorithm: Mapping[str, float],
+    out_path: str,
+    title: str = "Unlearning runtime by algorithm",
+) -> str:
+    if not runtime_seconds_by_algorithm:
+        raise RuntimeError("Cannot plot unlearning runtimes: input mapping is empty.")
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    labels = list(runtime_seconds_by_algorithm.keys())
+    values = np.asarray([float(runtime_seconds_by_algorithm[label]) for label in labels], dtype=np.float64)
+
+    x = np.arange(len(labels))
+    fig, ax = plt.subplots(1, 1, figsize=(10, 5), constrained_layout=True)
+    bars = ax.bar(x, values, color="#4c72b0")
+    ax.set_title(title)
+    ax.set_xlabel("Algorithm")
+    ax.set_ylabel("Runtime (seconds)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.grid(axis="y", alpha=0.3)
+
+    for bar, value in zip(bars, values):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            bar.get_height(),
+            f"{value:.1f}s",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    return out_path
+
+
 def load_mean_series(csv_path: str):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Missing trajectory CSV: {csv_path}")

@@ -100,7 +100,12 @@ def train_model(
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(net.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
     scheduler = None
-    if lr_milestones is not None:
+    if lr_milestones is None:
+        # Provide a simple default schedule for the original/retrain runs:
+        # drop LR halfway and again at 75% of training.
+        lr_milestones = sorted({num_epochs // 2, (3 * num_epochs) // 4})
+        lr_milestones = [m for m in lr_milestones if 0 < m < num_epochs]
+    if lr_milestones:
         scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_milestones, gamma=lr_gamma)
 
     amp = build_amp_config(device)

@@ -10,8 +10,8 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Dataset, Subset
 
 
-CIFAR10_MEAN = (0.5, 0.5, 0.5)
-CIFAR10_STD = (0.5, 0.5, 0.5)
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD = (0.2470, 0.2435, 0.2616)
 CIFAR10_CLASSES = (
     "airplane",
     "automobile",
@@ -26,9 +26,16 @@ CIFAR10_CLASSES = (
 )
 
 
-def cifar10_transform() -> transforms.Compose:
+def cifar10_transform(train: bool = False) -> transforms.Compose:
+    augmentations = []
+    if train:
+        augmentations = [
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+        ]
     return transforms.Compose(
-        [
+        augmentations
+        + [
             transforms.ToTensor(),
             transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
         ]
@@ -36,18 +43,17 @@ def cifar10_transform() -> transforms.Compose:
 
 
 def load_cifar10_datasets(root: str = "./data") -> Tuple[Dataset, Dataset]:
-    transform = cifar10_transform()
     trainset = torchvision.datasets.CIFAR10(
         root=root,
         train=True,
         download=True,
-        transform=transform,
+        transform=cifar10_transform(train=True),
     )
     testset = torchvision.datasets.CIFAR10(
         root=root,
         train=False,
         download=True,
-        transform=transform,
+        transform=cifar10_transform(train=False),
     )
     return trainset, testset
 
