@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from ..training import build_amp_config, evaluate
+from ..training import build_amp_config, build_grad_scaler, evaluate
 from .common import _infinite_loader, _loader_dataset_size, _save_snapshot
 
 
@@ -140,7 +140,7 @@ def run_salun_unlearning(
         momentum=config.momentum,
         weight_decay=0.0,
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
+    scaler = build_grad_scaler(device, enabled=amp.use_grad_scaler)
 
     history: List[np.ndarray] = []
     snapshot_paths: List[str] = []
@@ -150,12 +150,14 @@ def run_salun_unlearning(
         snapshot_paths.append(initial)
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
+    print(f"[SalUn] starting unlearning ({config.epochs} epochs)")
 
     max_mask_batches = min(config.mask_batches, len(forget_loader))
     salun_mask = build_salun_mask(
         estimate_salun_importance(model, forget_loader, criterion, device, max_mask_batches),
         config.mask_ratio,
     )
+    print(f"[SalUn] mask estimated ({max_mask_batches} batches, mask_ratio={config.mask_ratio:.2f})")
 
     retain_iter = _infinite_loader(retain_loader)
 
@@ -214,10 +216,12 @@ def run_salun_unlearning(
 
         _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
         history.append(per_class)
+        print(f"[SalUn] epoch {epoch}/{config.epochs} complete")
         path = _save_snapshot(model, snapshot_dir, epoch)
         if path is not None:
             snapshot_paths.append(path)
 
+    print("[SalUn] unlearning complete")
     return {"model": model, "classwise_history": history, "snapshot_paths": snapshot_paths}
 
 

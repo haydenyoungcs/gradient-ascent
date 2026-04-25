@@ -52,7 +52,7 @@ def _distill_kl(student_logits: torch.Tensor, teacher_logits: torch.Tensor, temp
 def _optimizer_step_with_optional_clip(
     loss: torch.Tensor,
     optimizer: optim.Optimizer,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: torch.amp.GradScaler,
     amp,
     parameters,
     grad_clip_norm: Optional[float],

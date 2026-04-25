@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from ..training import build_amp_config, evaluate
+from ..training import build_amp_config, build_grad_scaler, evaluate
 from .common import _save_snapshot, _set_bn_eval
 
 
@@ -44,7 +44,7 @@ def run_ga_unlearning(
     amp = build_amp_config(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=0.0)
-    scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
+    scaler = build_grad_scaler(device, enabled=amp.use_grad_scaler)
 
     history: List[np.ndarray] = []
     snapshot_paths: List[str] = []
@@ -54,6 +54,7 @@ def run_ga_unlearning(
         snapshot_paths.append(initial)
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
+    print(f"[GA] starting unlearning ({config.epochs} epochs)")
 
     for epoch in range(1, config.epochs + 1):
         model.train()
@@ -85,10 +86,12 @@ def run_ga_unlearning(
 
         _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
         history.append(per_class)
+        print(f"[GA] epoch {epoch}/{config.epochs} complete")
         path = _save_snapshot(model, snapshot_dir, epoch)
         if path is not None:
             snapshot_paths.append(path)
 
+    print("[GA] unlearning complete")
     return {"model": model, "classwise_history": history, "snapshot_paths": snapshot_paths}
 
 

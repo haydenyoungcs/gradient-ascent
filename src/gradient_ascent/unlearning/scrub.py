@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from ..training import build_amp_config, evaluate
+from ..training import build_amp_config, build_grad_scaler, evaluate
 from .common import (
     _distill_kl,
     _freeze_model,
@@ -116,7 +116,7 @@ def run_scrub_unlearning(
     amp = build_amp_config(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = _build_scrub_optimizer(model, config)
-    scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
+    scaler = build_grad_scaler(device, enabled=amp.use_grad_scaler)
     trainable_params = [param for param in model.parameters() if param.requires_grad]
 
     teacher = copy.deepcopy(model) if teacher_model is None else teacher_model
@@ -132,6 +132,10 @@ def run_scrub_unlearning(
         snapshot_paths.append(initial)
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
+    print(
+        "[SCRUB] starting unlearning "
+        f"({config.epochs} epochs; forget_phase_epochs={config.forget_phase_epochs})"
+    )
 
     retain_iter = _infinite_loader(retain_loader)
 
@@ -139,7 +143,8 @@ def run_scrub_unlearning(
         in_forget_phase = epoch <= config.forget_phase_epochs
         if epoch == config.forget_phase_epochs + 1 and config.reset_optimizer_after_forget:
             optimizer = _build_scrub_optimizer(model, config)
-            scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
+            scaler = build_grad_scaler(device, enabled=amp.use_grad_scaler)
+            print("[SCRUB] switched to recovery phase (optimizer and scaler reset)")
 
         model.train()
         if config.freeze_bn:
@@ -239,10 +244,16 @@ def run_scrub_unlearning(
 
         _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
         history.append(per_class)
+        phase_name = "forget" if in_forget_phase else "recovery"
+        print(
+            f"[SCRUB] epoch {epoch}/{config.epochs} complete "
+            f"(phase={phase_name}, forget_batches={forget_batches}, retain_batches={retain_batches})"
+        )
         path = _save_snapshot(model, snapshot_dir, epoch)
         if path is not None:
             snapshot_paths.append(path)
 
+    print("[SCRUB] unlearning complete")
     return {
         "model": model,
         "classwise_history": history,

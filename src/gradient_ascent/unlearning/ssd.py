@@ -209,6 +209,7 @@ def run_ssd_unlearning(
     """One-shot Selective Synaptic Dampening as specified in Foster et al. (2023)."""
     config = config or SSDConfig()
     criterion = nn.CrossEntropyLoss()
+    print("[SSD] starting unlearning (one-shot Fisher dampening)")
 
     history: List[np.ndarray] = []
     snapshot_paths: List[str] = []
@@ -229,6 +230,7 @@ def run_ssd_unlearning(
         fisher_samples_per_batch=config.fisher_samples_per_batch,
         selection_basis=config.selection_basis,
     )
+    print("[SSD] Fisher estimation complete; applying dampening")
     diagnostics = _apply_ssd_dampening(model, fisher_forget, fisher_ref, config)
 
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
@@ -237,6 +239,7 @@ def run_ssd_unlearning(
     if path is not None:
         snapshot_paths.append(path)
 
+    print("[SSD] unlearning complete")
     return {
         "model": model,
         "classwise_history": history,

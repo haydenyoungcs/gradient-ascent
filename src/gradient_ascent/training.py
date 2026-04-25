@@ -33,6 +33,13 @@ def build_amp_config(device: torch.device) -> AmpConfig:
     return AmpConfig(enabled=enabled, dtype=dtype, use_grad_scaler=use_grad_scaler)
 
 
+def build_grad_scaler(device: torch.device, enabled: bool) -> torch.amp.GradScaler:
+    """Construct a GradScaler using the non-deprecated torch.amp API."""
+    if device.type == "cuda":
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    return torch.amp.GradScaler("cpu", enabled=False)
+
+
 @torch.inference_mode()
 def evaluate(
     net: nn.Module,
@@ -97,7 +104,7 @@ def train_model(
         scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_milestones, gamma=lr_gamma)
 
     amp = build_amp_config(device)
-    scaler = torch.cuda.amp.GradScaler(enabled=amp.use_grad_scaler)
+    scaler = build_grad_scaler(device, enabled=amp.use_grad_scaler)
 
     acc_history: List[float] = []
     time_history: List[float] = []

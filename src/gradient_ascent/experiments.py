@@ -313,6 +313,7 @@ def run_core_checkpoints(
 
     ga_model = model_factory()
     ga_model.load_state_dict(torch.load(original_path, map_location=device))
+    print("[Core] Running GA unlearning...")
     ga_result = run_ga_unlearning(
         ga_model,
         forget_loader,
@@ -324,9 +325,11 @@ def run_core_checkpoints(
     )
     torch.save(ga_result["model"].state_dict(), f"{config.out_dir}/unlearned_net.pt")
     torch.save(ga_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_ga.pt")
+    print("[Core] GA complete")
 
     ssd_model = model_factory()
     ssd_model.load_state_dict(torch.load(original_path, map_location=device))
+    print("[Core] Running SSD unlearning...")
     ssd_result = run_ssd_unlearning(
         ssd_model,
         forget_loader,
@@ -338,9 +341,11 @@ def run_core_checkpoints(
         snapshot_dir=f"{config.out_dir}/unlearning_snapshots_ssd",
     )
     torch.save(ssd_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_ssd.pt")
+    print("[Core] SSD complete")
 
     salun_model = model_factory()
     salun_model.load_state_dict(torch.load(original_path, map_location=device))
+    print("[Core] Running SalUn unlearning...")
     salun_result = run_salun_unlearning(
         salun_model,
         forget_loader,
@@ -352,9 +357,11 @@ def run_core_checkpoints(
         snapshot_dir=f"{config.out_dir}/unlearning_snapshots_salun",
     )
     torch.save(salun_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_salun.pt")
+    print("[Core] SalUn complete")
 
     certified_model = model_factory()
     certified_model.load_state_dict(torch.load(original_path, map_location=device))
+    print("[Core] Running Certified Removal unlearning...")
     certified_result = run_certified_unlearning(
         certified_model,
         forget_loader,
@@ -366,9 +373,11 @@ def run_core_checkpoints(
         snapshot_dir=f"{config.out_dir}/unlearning_snapshots_certified",
     )
     torch.save(certified_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_certified.pt")
+    print("[Core] Certified Removal complete")
 
     scrub_model = model_factory()
     scrub_model.load_state_dict(torch.load(original_path, map_location=device))
+    print("[Core] Running SCRUB unlearning...")
     scrub_result = run_scrub_unlearning(
         scrub_model,
         scrub_forget_loader,
@@ -380,6 +389,7 @@ def run_core_checkpoints(
         snapshot_dir=f"{config.out_dir}/unlearning_snapshots_scrub",
     )
     torch.save(scrub_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_scrub.pt")
+    print("[Core] SCRUB complete")
 
     algorithm_artifacts = {
         "ga": _save_classwise_artifacts("ga", "GA", ga_result["classwise_history"], config),

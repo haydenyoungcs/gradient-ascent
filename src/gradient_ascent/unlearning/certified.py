@@ -260,6 +260,7 @@ def run_certified_unlearning(
 ) -> dict:
     """Last-layer certified data removal (Guo et al., 2020)."""
     config = config or CertifiedConfig()
+    print("[Certified] starting unlearning (last-layer certified removal)")
 
     history: List[np.ndarray] = []
     snapshot_paths: List[str] = []
@@ -272,6 +273,7 @@ def run_certified_unlearning(
 
     forget_feats, forget_labels = _extract_penultimate_features(model, forget_loader, device)
     retain_feats, retain_labels = _extract_penultimate_features(model, retain_loader, device)
+    print("[Certified] extracted forget/retain penultimate features")
 
     if config.feature_clip > 0.0:
         forget_feats = _clip_feature_norms(forget_feats, config.feature_clip)
@@ -296,6 +298,7 @@ def run_certified_unlearning(
         init_b=b_init,
     )
     _install_head(model, W_star, b_star)
+    print("[Certified] refit complete; solving influence-system correction")
 
     _, per_class = evaluate(model, testloader, num_classes=num_classes, device=device)
     history.append(per_class)
@@ -366,6 +369,7 @@ def run_certified_unlearning(
     if path is not None:
         snapshot_paths.append(path)
 
+    print("[Certified] unlearning complete")
     return {"model": model, "classwise_history": history, "snapshot_paths": snapshot_paths}
 
 
