@@ -57,9 +57,10 @@ class SCRUBConfig:
     lr: float = 5e-4
     epochs: int = 5
     forget_phase_epochs: int = 2
-    max_forget_batches_per_epoch: Optional[int] = None
+    max_forget_batches_per_epoch: Optional[int] = 3
+    max_retain_batches_per_epoch: Optional[int] = 20
     recovery_beta_scale: float = 0.0
-    recovery_max_forget_batches_per_epoch: Optional[int] = None
+    recovery_max_forget_batches_per_epoch: Optional[int] = 1
     alpha: float = 1.0
     beta: float = 1.0
     gamma: float = 1.0
@@ -112,6 +113,12 @@ def run_scrub_unlearning(
         raise ValueError(
             f"recovery_beta_scale must lie in [0, 1], got {config.recovery_beta_scale}."
         )
+    if config.max_forget_batches_per_epoch is None:
+        raise ValueError("max_forget_batches_per_epoch must be set to enforce a hard update cap.")
+    if config.max_retain_batches_per_epoch is None:
+        raise ValueError("max_retain_batches_per_epoch must be set to enforce a hard update cap.")
+    if config.recovery_max_forget_batches_per_epoch is None:
+        raise ValueError("recovery_max_forget_batches_per_epoch must be set to enforce a hard update cap.")
 
     amp = build_amp_config(device)
     criterion = nn.CrossEntropyLoss()
@@ -185,7 +192,7 @@ def run_scrub_unlearning(
                     loss = (
                         config.alpha * retain_kl
                         + config.gamma * retain_ce
-                        - (config.beta * epoch_beta_scale) * forget_kl
+                        + (config.beta * epoch_beta_scale) * forget_kl
                     )
 
                 if not torch.isfinite(loss.detach()):
@@ -205,7 +212,9 @@ def run_scrub_unlearning(
                 retain_batches += 1
 
         if not in_forget_phase:
-            for retain_inputs, retain_labels in retain_loader:
+            for batch_idx, (retain_inputs, retain_labels) in enumerate(retain_loader):
+                if config.max_retain_batches_per_epoch is not None and batch_idx >= config.max_retain_batches_per_epoch:
+                    break
                 retain_inputs = retain_inputs.to(device, non_blocking=True)
                 retain_labels = retain_labels.to(device, non_blocking=True)
                 optimizer.zero_grad(set_to_none=True)

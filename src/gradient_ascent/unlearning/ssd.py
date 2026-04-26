@@ -45,6 +45,7 @@ class SSDConfig:
     fisher_batches: int = 100
     fisher_samples_per_batch: int = 32
     selection_basis: str = "retain"
+    fisher_mode: str = "batch"
 
 
 def estimate_empirical_fisher_diag(
@@ -54,43 +55,56 @@ def estimate_empirical_fisher_diag(
     device: torch.device,
     max_batches: int,
     samples_per_batch: Optional[int] = None,
+    fisher_mode: str = "batch",
 ) -> Dict[str, torch.Tensor]:
     params_named = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
     fisher = {name: torch.zeros_like(param, device=device) for name, param in params_named}
 
     model.eval()
-    n_samples = 0
+    n_accum_steps = 0
     for batch_idx, (inputs, labels) in enumerate(loader):
         if batch_idx >= max_batches:
             break
         inputs = inputs.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        logits = model(inputs)
-        losses = F.cross_entropy(logits, labels, reduction="none")
+        if fisher_mode == "batch":
+            model.zero_grad(set_to_none=True)
+            logits = model(inputs)
+            loss = criterion(logits, labels)
+            loss.backward()
+            for name, param in params_named:
+                if param.grad is not None:
+                    fisher[name] += param.grad.detach() ** 2
+            n_accum_steps += 1
+        elif fisher_mode == "per_sample":
+            logits = model(inputs)
+            losses = F.cross_entropy(logits, labels, reduction="none")
 
-        batch_size = int(labels.shape[0])
-        if samples_per_batch is None or samples_per_batch >= batch_size:
-            selected_indices = range(batch_size)
+            batch_size = int(labels.shape[0])
+            if samples_per_batch is None or samples_per_batch >= batch_size:
+                selected_indices = range(batch_size)
+            else:
+                selected_indices = torch.randperm(batch_size, device=labels.device)[:samples_per_batch].tolist()
+
+            selected_count = len(selected_indices)
+            for sample_pos, sample_idx in enumerate(selected_indices):
+                grads = torch.autograd.grad(
+                    losses[sample_idx],
+                    [param for _, param in params_named],
+                    retain_graph=sample_pos < selected_count - 1,
+                    create_graph=False,
+                )
+                for (name, _), grad in zip(params_named, grads):
+                    fisher[name] += grad.detach() ** 2
+                n_accum_steps += 1
         else:
-            selected_indices = range(samples_per_batch)
+            raise ValueError(f"Unknown fisher_mode '{fisher_mode}'; expected 'batch' or 'per_sample'.")
 
-        selected_count = len(selected_indices)
-        for sample_pos, sample_idx in enumerate(selected_indices):
-            grads = torch.autograd.grad(
-                losses[sample_idx],
-                [param for _, param in params_named],
-                retain_graph=sample_pos < selected_count - 1,
-                create_graph=False,
-            )
-            for (name, _), grad in zip(params_named, grads):
-                fisher[name] += grad.detach() ** 2
-            n_samples += 1
-
-    if n_samples == 0:
+    if n_accum_steps == 0:
         raise RuntimeError("No batches processed for Fisher estimation.")
     for name in fisher:
-        fisher[name] /= float(n_samples)
+        fisher[name] /= float(n_accum_steps)
     return fisher
 
 
@@ -115,6 +129,7 @@ def _estimate_ssd_fishers(
     fisher_batches: int,
     fisher_samples_per_batch: Optional[int] = None,
     selection_basis: str = "retain",
+    fisher_mode: str = "batch",
 ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """Return ``(I_forget, I_ref)`` where ``I_ref`` is the reference Fisher."""
     max_forget_batches = min(fisher_batches, len(forget_loader))
@@ -126,6 +141,7 @@ def _estimate_ssd_fishers(
         device,
         max_forget_batches,
         samples_per_batch=fisher_samples_per_batch,
+        fisher_mode=fisher_mode,
     )
     fisher_retain = estimate_empirical_fisher_diag(
         model,
@@ -134,6 +150,7 @@ def _estimate_ssd_fishers(
         device,
         max_retain_batches,
         samples_per_batch=fisher_samples_per_batch,
+        fisher_mode=fisher_mode,
     )
 
     if selection_basis == "retain":
@@ -229,6 +246,7 @@ def run_ssd_unlearning(
         config.fisher_batches,
         fisher_samples_per_batch=config.fisher_samples_per_batch,
         selection_basis=config.selection_basis,
+        fisher_mode=config.fisher_mode,
     )
     print("[SSD] Fisher estimation complete; applying dampening")
     diagnostics = _apply_ssd_dampening(model, fisher_forget, fisher_ref, config)

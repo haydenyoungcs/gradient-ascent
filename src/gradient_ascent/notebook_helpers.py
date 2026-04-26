@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+import itertools
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,8 +42,8 @@ from .similarity import (
     evaluate_pair_rows,
     transform_rows_for_plot,
 )
-from .training import build_amp_config, configure_runtime
-from .unlearning import GAConfig, SCRUBConfig, SSDConfig
+from .training import build_amp_config, configure_runtime, evaluate
+from .unlearning import GAConfig, SCRUBConfig, SSDConfig, run_scrub_unlearning, run_ssd_unlearning
 
 ALGORITHM_ORDER = ["ga", "ssd", "salun", "certified", "scrub"]
 
@@ -70,6 +72,16 @@ class SimilaritySetup:
     plot_metric_names: list[str]
 
 
+@dataclass(frozen=True)
+class SweepRunSummary:
+    algorithm: str
+    config_label: str
+    runtime_seconds: float
+    forget_class_accuracy: float
+    mean_retain_accuracy: float
+    worst_retain_accuracy: float
+
+
 def build_default_core_config(
     num_classes: int = 10,
     model_depth: int = 50,
@@ -86,18 +98,17 @@ def build_default_core_config(
         freeze_bn=False,
         grad_clip_norm=None,
     )
-    # For SSD we want stronger forgetting on the target class without turning
-    # the one-shot dampening step into broad collateral damage. The preset below
-    # therefore moves in three easy-to-explain directions at once: slightly
-    # more permissive selection, slightly stronger dampening on selected
-    # weights, and more stable Fisher estimates from larger samples.
+    # SSD was previously over-aggressive and expensive in this notebook setup.
+    # These defaults trade a bit of forgetting strength for much lower runtime
+    # and substantially less collateral damage on non-forgotten classes.
     ssd_config = SSDConfig(
-        alpha=4.5,
-        lambda_=0.7,
+        alpha=8.0,
+        lambda_=0.9,
         eps=1e-12,
-        fisher_batches=200,
-        fisher_samples_per_batch=64,
+        fisher_batches=80,
+        fisher_samples_per_batch=16,
         selection_basis="retain",
+        fisher_mode="batch",
     )
     # The forget-side SCRUB objective now pushes forgotten examples toward an
     # uninformative prediction rather than toward an arbitrary wrong class. The
@@ -106,11 +117,12 @@ def build_default_core_config(
     # smoothly without causing large spikes in unrelated classes.
     scrub_config = SCRUBConfig(
         lr=5e-5,
-        epochs=10,
+        epochs=6,
         forget_phase_epochs=2,
         max_forget_batches_per_epoch=3,
         recovery_beta_scale=0.15,
         recovery_max_forget_batches_per_epoch=1,
+        max_retain_batches_per_epoch=20,
         alpha=3.0,
         beta=0.4,
         gamma=3.0,
@@ -145,10 +157,12 @@ def build_core_wandb_config(config: CoreExperimentConfig) -> dict[str, object]:
         "ssd_alpha": config.ssd_config.alpha,
         "ssd_lambda": config.ssd_config.lambda_,
         "ssd_fisher_batches": config.ssd_config.fisher_batches,
+        "ssd_fisher_mode": config.ssd_config.fisher_mode,
         "scrub_lr": config.scrub_config.lr,
         "scrub_epochs": config.scrub_config.epochs,
         "scrub_forget_phase_epochs": config.scrub_config.forget_phase_epochs,
         "scrub_max_forget_batches_per_epoch": config.scrub_config.max_forget_batches_per_epoch,
+        "scrub_max_retain_batches_per_epoch": config.scrub_config.max_retain_batches_per_epoch,
         "scrub_recovery_beta_scale": config.scrub_config.recovery_beta_scale,
         "scrub_recovery_max_forget_batches_per_epoch": config.scrub_config.recovery_max_forget_batches_per_epoch,
         "scrub_alpha": config.scrub_config.alpha,
@@ -156,6 +170,182 @@ def build_core_wandb_config(config: CoreExperimentConfig) -> dict[str, object]:
         "scrub_gamma": config.scrub_config.gamma,
         "scrub_temperature": config.scrub_config.temperature,
     }
+
+
+def _summarize_unlearned_model(
+    model: nn.Module,
+    test_loader,
+    device: torch.device,
+    target_label: int,
+    num_classes: int,
+) -> tuple[float, float, float]:
+    _, per_class = evaluate(model, test_loader, num_classes=num_classes, device=device)
+    forget_acc = float(per_class[target_label])
+    retain_accs = [float(per_class[idx]) for idx in range(num_classes) if idx != target_label]
+    mean_retain = float(np.mean(retain_accs)) if retain_accs else 0.0
+    worst_retain = float(np.min(retain_accs)) if retain_accs else 0.0
+    return forget_acc, mean_retain, worst_retain
+
+
+def run_fixed_budget_ssd_scrub_sweeps(
+    runtime: NotebookRuntime,
+    original_checkpoint_path: str,
+    ssd_alphas: Sequence[float] = (6.0, 8.0, 10.0),
+    ssd_lambdas: Sequence[float] = (0.7, 0.9, 1.0),
+    scrub_betas: Sequence[float] = (0.2, 0.4, 0.8),
+    scrub_recovery_beta_scales: Sequence[float] = (0.0, 0.1, 0.2),
+    scrub_retain_caps: Sequence[int] = (10, 20, 30),
+) -> tuple[str, list[SweepRunSummary]]:
+    """Run small SSD/SCRUB sweeps under fixed compute budgets and save a CSV."""
+    target_label = runtime.core_config.target_label
+    forget_subset, retain_subset = make_forget_retain_subsets(runtime.trainset, target_label)
+    batch_size = runtime.core_config.unlearn_batch_size or 256
+    test_loader = make_loader(
+        runtime.testset,
+        batch_size=min(256, batch_size),
+        shuffle=False,
+        num_workers=runtime.num_workers,
+        use_cuda=runtime.use_cuda,
+    )
+    forget_loader = make_loader(
+        forget_subset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=runtime.num_workers,
+        use_cuda=runtime.use_cuda,
+    )
+    retain_loader = make_loader(
+        retain_subset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=runtime.num_workers,
+        use_cuda=runtime.use_cuda,
+    )
+
+    summaries: list[SweepRunSummary] = []
+    base_ssd = runtime.core_config.ssd_config
+    for alpha, lambda_ in itertools.product(ssd_alphas, ssd_lambdas):
+        model = runtime.model_factory()
+        model.load_state_dict(torch.load(original_checkpoint_path, map_location=runtime.device))
+        config = SSDConfig(
+            alpha=float(alpha),
+            lambda_=float(lambda_),
+            eps=base_ssd.eps,
+            fisher_batches=base_ssd.fisher_batches,
+            fisher_samples_per_batch=base_ssd.fisher_samples_per_batch,
+            selection_basis=base_ssd.selection_basis,
+            fisher_mode=base_ssd.fisher_mode,
+        )
+        t0 = time.perf_counter()
+        result = run_ssd_unlearning(
+            model,
+            forget_loader,
+            retain_loader,
+            test_loader,
+            runtime.device,
+            config=config,
+            num_classes=runtime.num_classes,
+            snapshot_dir=None,
+        )
+        runtime_seconds = time.perf_counter() - t0
+        forget_acc, mean_retain, worst_retain = _summarize_unlearned_model(
+            result["model"],
+            test_loader,
+            runtime.device,
+            target_label=target_label,
+            num_classes=runtime.num_classes,
+        )
+        summaries.append(
+            SweepRunSummary(
+                algorithm="ssd",
+                config_label=f"alpha={alpha},lambda={lambda_}",
+                runtime_seconds=float(runtime_seconds),
+                forget_class_accuracy=forget_acc,
+                mean_retain_accuracy=mean_retain,
+                worst_retain_accuracy=worst_retain,
+            )
+        )
+
+    base_scrub = runtime.core_config.scrub_config
+    for beta, recovery_beta_scale, retain_cap in itertools.product(
+        scrub_betas, scrub_recovery_beta_scales, scrub_retain_caps
+    ):
+        model = runtime.model_factory()
+        model.load_state_dict(torch.load(original_checkpoint_path, map_location=runtime.device))
+        config = SCRUBConfig(
+            lr=base_scrub.lr,
+            epochs=base_scrub.epochs,
+            forget_phase_epochs=base_scrub.forget_phase_epochs,
+            max_forget_batches_per_epoch=base_scrub.max_forget_batches_per_epoch,
+            max_retain_batches_per_epoch=int(retain_cap),
+            recovery_beta_scale=float(recovery_beta_scale),
+            recovery_max_forget_batches_per_epoch=base_scrub.recovery_max_forget_batches_per_epoch,
+            alpha=base_scrub.alpha,
+            beta=float(beta),
+            gamma=base_scrub.gamma,
+            temperature=base_scrub.temperature,
+            weight_decay=base_scrub.weight_decay,
+            batch_size=base_scrub.batch_size,
+            grad_clip_norm=base_scrub.grad_clip_norm,
+            freeze_bn=base_scrub.freeze_bn,
+            reset_optimizer_after_forget=base_scrub.reset_optimizer_after_forget,
+        )
+        t0 = time.perf_counter()
+        result = run_scrub_unlearning(
+            model,
+            forget_loader,
+            retain_loader,
+            test_loader,
+            runtime.device,
+            config=config,
+            num_classes=runtime.num_classes,
+            snapshot_dir=None,
+        )
+        runtime_seconds = time.perf_counter() - t0
+        forget_acc, mean_retain, worst_retain = _summarize_unlearned_model(
+            result["model"],
+            test_loader,
+            runtime.device,
+            target_label=target_label,
+            num_classes=runtime.num_classes,
+        )
+        summaries.append(
+            SweepRunSummary(
+                algorithm="scrub",
+                config_label=f"beta={beta},recovery_beta={recovery_beta_scale},retain_cap={retain_cap}",
+                runtime_seconds=float(runtime_seconds),
+                forget_class_accuracy=forget_acc,
+                mean_retain_accuracy=mean_retain,
+                worst_retain_accuracy=worst_retain,
+            )
+        )
+
+    csv_path = Path(runtime.out_dir) / "fixed_budget_ssd_scrub_sweeps.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "algorithm",
+                "config_label",
+                "runtime_seconds",
+                "forget_class_accuracy",
+                "mean_retain_accuracy",
+                "worst_retain_accuracy",
+            ],
+        )
+        writer.writeheader()
+        for row in summaries:
+            writer.writerow(
+                {
+                    "algorithm": row.algorithm,
+                    "config_label": row.config_label,
+                    "runtime_seconds": row.runtime_seconds,
+                    "forget_class_accuracy": row.forget_class_accuracy,
+                    "mean_retain_accuracy": row.mean_retain_accuracy,
+                    "worst_retain_accuracy": row.worst_retain_accuracy,
+                }
+            )
+    return str(csv_path), summaries
 
 
 def prepare_notebook_runtime(
