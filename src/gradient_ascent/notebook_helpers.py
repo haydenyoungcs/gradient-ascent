@@ -98,22 +98,21 @@ def build_default_core_config(
         selection_basis="retain",
         fisher_mode="batch",
     )
-    # The forget-side SCRUB objective now pushes forgotten examples toward an
-    # uninformative prediction rather than toward an arbitrary wrong class. The
-    # preset below pairs that with a short scrub phase and a light residual
-    # forget signal during recovery, so the target class stays suppressed more
-    # smoothly without causing large spikes in unrelated classes.
+    # SCRUB preset tuned to keep frog forgetting stronger late in training:
+    # - more forget batches in the scrub phase,
+    # - non-trivial residual forget pressure in recovery,
+    # - lower retain CE weight so recovery does not quickly relearn frogs.
     scrub_config = SCRUBConfig(
         lr=5e-5,
         epochs=6,
-        forget_phase_epochs=2,
-        max_forget_batches_per_epoch=3,
-        recovery_beta_scale=0.15,
-        recovery_max_forget_batches_per_epoch=1,
-        max_retain_batches_per_epoch=20,
-        alpha=3.0,
-        beta=0.4,
-        gamma=3.0,
+        forget_phase_epochs=3,
+        max_forget_batches_per_epoch=6,
+        recovery_beta_scale=0.4,
+        recovery_max_forget_batches_per_epoch=3,
+        max_retain_batches_per_epoch=12,
+        alpha=2.5,
+        beta=0.8,
+        gamma=2.0,
         temperature=2.0,
         weight_decay=1e-4,
         grad_clip_norm=0.5,

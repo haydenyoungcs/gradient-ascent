@@ -59,10 +59,10 @@ class SCRUBConfig:
     forget_phase_epochs: int = 2
     max_forget_batches_per_epoch: Optional[int] = 3
     max_retain_batches_per_epoch: Optional[int] = 20
-    recovery_beta_scale: float = 0.0
+    recovery_beta_scale: float = 0.4
     recovery_max_forget_batches_per_epoch: Optional[int] = 1
-    alpha: float = 1.0
-    beta: float = 1.0
+    alpha: float = 2.5
+    beta: float = 0.8
     gamma: float = 1.0
     temperature: float = 2.0
     weight_decay: float = 1e-4
