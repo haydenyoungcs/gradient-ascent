@@ -170,7 +170,8 @@ def run_scrub_unlearning(
             else config.recovery_max_forget_batches_per_epoch
         )
 
-        if epoch_beta_scale > 0.0:
+        run_paired_loop = in_forget_phase or (not in_forget_phase and epoch_beta_scale > 0.0)
+        if run_paired_loop:
             for batch_idx, (forget_inputs, _forget_labels) in enumerate(forget_loader):
                 if max_forget_batches is not None and batch_idx >= max_forget_batches:
                     break
@@ -211,7 +212,11 @@ def run_scrub_unlearning(
                 retain_ce_sum += float(retain_ce.detach().item())
                 retain_batches += 1
 
-        if not in_forget_phase:
+        # Keep recovery close to SCRUB's staged schedule: if a recovery forget
+        # signal is enabled, use only the paired loop above; otherwise, run a
+        # pure retain loop. This avoids over-weighting retain updates by running
+        # both loops in the same recovery epoch.
+        if (not in_forget_phase) and (not run_paired_loop):
             for batch_idx, (retain_inputs, retain_labels) in enumerate(retain_loader):
                 if config.max_retain_batches_per_epoch is not None and batch_idx >= config.max_retain_batches_per_epoch:
                     break
