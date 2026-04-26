@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -266,30 +266,3 @@ def run_ssd_unlearning(
     }
 
 
-def run_ssd_snapshots(
-    model_factory: Callable[[], nn.Module],
-    original_checkpoint_path: str,
-    forget_loader,
-    retain_loader,
-    testloader,
-    device: torch.device,
-    snapshot_dir: str,
-    final_checkpoint_path: Optional[str] = None,
-    config: Optional[SSDConfig] = None,
-    num_classes: int = 10,
-) -> str:
-    model = model_factory()
-    model.load_state_dict(torch.load(original_checkpoint_path, map_location=device))
-    result = run_ssd_unlearning(
-        model,
-        forget_loader,
-        retain_loader,
-        testloader,
-        device,
-        config=config,
-        num_classes=num_classes,
-        snapshot_dir=snapshot_dir,
-    )
-    if final_checkpoint_path is not None:
-        torch.save(result["model"].state_dict(), final_checkpoint_path)
-    return snapshot_dir

@@ -23,21 +23,6 @@ def save_similarity_trajectory_csv(
                 writer.writerow({"epoch": epoch, **row})
 
 
-def build_mean_metric_series(
-    epoch_rows: Sequence[Tuple[int, List[dict]]],
-    metric_names: Iterable[str],
-) -> Tuple[List[int], Dict[str, List[float]]]:
-    metric_names = list(metric_names)
-    epochs = [epoch for epoch, _ in epoch_rows]
-    series = {metric_name: [] for metric_name in metric_names}
-
-    for _epoch, rows in epoch_rows:
-        for metric_name in metric_names:
-            series[metric_name].append(float(np.mean([row[metric_name] for row in rows])))
-
-    return epochs, series
-
-
 def orient_epoch_rows_for_similarity(
     epoch_rows: Sequence[Tuple[int, List[dict]]],
     metric_names: Iterable[str],

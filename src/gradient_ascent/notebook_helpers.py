@@ -317,6 +317,108 @@ def save_notebook_combined_comparison(
     )
 
 
+def run_and_display_notebook_core_pipeline(
+    runtime: NotebookRuntime,
+    wandb_module=None,
+    reuse_existing_checkpoints: bool = False,
+    reuse_original_checkpoint: Optional[bool] = None,
+    reuse_retrained_checkpoint: Optional[bool] = None,
+):
+    """Run the full core experiment and render notebook outputs inline.
+
+    This helper keeps notebook cells compact by wrapping:
+    - core checkpoint/original/retrained training,
+    - all five unlearning baselines,
+    - runtime and summary prints,
+    - GA/SCRUB diagnostic exports and plots.
+    """
+    from IPython.display import Image as IPyImage, display
+
+    core_artifacts, wandb_run = run_notebook_core_experiment(
+        runtime,
+        wandb_module=wandb_module,
+        reuse_existing_checkpoints=reuse_existing_checkpoints,
+        reuse_original_checkpoint=reuse_original_checkpoint,
+        reuse_retrained_checkpoint=reuse_retrained_checkpoint,
+    )
+
+    display(IPyImage(filename=core_artifacts.original_vs_retrain_plot_path))
+    display(IPyImage(filename=core_artifacts.original_classwise_plot_path))
+    display(IPyImage(filename=core_artifacts.retrained_classwise_plot_path))
+    display(IPyImage(filename=core_artifacts.retrained_vs_original_percent_diff_plot_path))
+    for algorithm_key in ALGORITHM_ORDER:
+        artifact = core_artifacts.algorithm_artifacts[algorithm_key]
+        display(IPyImage(filename=artifact.classwise_percent_plot_path))
+        display(IPyImage(filename=artifact.classwise_absolute_plot_path))
+
+    for key, value in core_artifacts.summary_metrics.items():
+        print(f"{key}: {value:.3f}")
+
+    print(f"Saved unlearning runtime CSV to {core_artifacts.unlearning_runtime_csv_path}")
+    print(f"Saved unlearning runtime plot to {core_artifacts.unlearning_runtime_plot_path}")
+    display(IPyImage(filename=core_artifacts.unlearning_runtime_plot_path))
+
+    ga_csv_path, ga_plot_path = save_ga_diagnostics(
+        runtime,
+        core_artifacts,
+        wandb_run=wandb_run,
+        wandb_module=wandb_module,
+    )
+    print(f"Saved GA diagnostics CSV to {ga_csv_path}")
+    print(f"Saved GA diagnostics plot to {ga_plot_path}")
+    display(IPyImage(filename=ga_plot_path))
+
+    scrub_csv_path, scrub_plot_path = save_scrub_diagnostics(
+        runtime,
+        core_artifacts,
+        wandb_run=wandb_run,
+        wandb_module=wandb_module,
+    )
+    print(f"Saved SCRUB diagnostics CSV to {scrub_csv_path}")
+    print(f"Saved SCRUB diagnostics plot to {scrub_plot_path}")
+    display(IPyImage(filename=scrub_plot_path))
+
+    return core_artifacts, wandb_run
+
+
+def run_and_display_notebook_trajectory_pipeline(
+    runtime: NotebookRuntime,
+    core_artifacts: CoreExperimentArtifacts,
+    similarity_setup: SimilaritySetup,
+    wandb_module=None,
+):
+    """Run trajectory/MIA/similarity analysis and display all generated figures."""
+    from IPython.display import Image as IPyImage, display
+
+    trajectory_artifacts, trajectory_wandb_run = run_notebook_trajectory_experiment(
+        runtime,
+        core_artifacts,
+        similarity_setup,
+        wandb_module=wandb_module,
+    )
+
+    for algorithm_key in ALGORITHM_ORDER:
+        mia_artifact = trajectory_artifacts.mia_artifacts[algorithm_key]
+        display(IPyImage(filename=mia_artifact.grid_plot_path))
+        display(IPyImage(filename=mia_artifact.control_plot_path))
+        for reference_key in ["retrained", "original"]:
+            similarity_artifact = trajectory_artifacts.similarity_artifacts[algorithm_key][reference_key]
+            display(IPyImage(filename=similarity_artifact.summary_plot_path))
+            display(IPyImage(filename=similarity_artifact.heatmap_plot_path))
+
+    return trajectory_artifacts, trajectory_wandb_run
+
+
+def run_and_display_notebook_combined_comparison(runtime: NotebookRuntime, wandb_module=None) -> str:
+    """Generate and display the combined cross-algorithm comparison figure."""
+    from IPython.display import Image as IPyImage, display
+
+    combined_path = save_notebook_combined_comparison(runtime, wandb_module=wandb_module)
+    print(f"Saved integrated comparison figure to {combined_path}")
+    display(IPyImage(filename=combined_path))
+    return combined_path
+
+
 def _compute_mean_forget_loss_and_grad_norm(model, loader, device):
     criterion = nn.CrossEntropyLoss()
     model.eval()

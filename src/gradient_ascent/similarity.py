@@ -5,11 +5,8 @@ from typing import Dict, Iterable, List, Optional, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
-import ot
-import scipy.stats
 import torch
 from scipy.linalg import svd
-from scipy.spatial.distance import cdist
 
 from .models import DEFAULT_LAYER_NAMES
 
@@ -155,66 +152,6 @@ class CosineSimilarity:
         return float(np.mean(np.sum(x_norm * y_norm, axis=1)))
 
 
-class EarthMoversDistance:
-    def compute_similarity(self, x: Union[np.ndarray, torch.Tensor], y: Union[np.ndarray, torch.Tensor]) -> float:
-        if isinstance(x, torch.Tensor):
-            x = x.detach().cpu().numpy()
-        if isinstance(y, torch.Tensor):
-            y = y.detach().cpu().numpy()
-        if x.ndim > 2:
-            x = x.reshape(x.shape[0], -1)
-        if y.ndim > 2:
-            y = y.reshape(y.shape[0], -1)
-        if x.shape[1] != y.shape[1]:
-            raise ValueError("x and y must have the same number of features")
-
-        emd_per_feature = [scipy.stats.wasserstein_distance(x[:, i], y[:, i]) for i in range(x.shape[1])]
-        return float(np.mean(emd_per_feature))
-
-
-class GromovWassersteinDistance:
-    def __init__(
-        self,
-        intra_metric: str = "cosine",
-        loss_fun: str = "square_loss",
-        reg: float = 5e-4,
-        max_iter: int = 30,
-        tol: float = 1e-9,
-        to_similarity=lambda d: 1.0 / (1.0 + d),
-    ):
-        self.intra_metric = intra_metric
-        self.loss_fun = loss_fun
-        self.reg = reg
-        self.max_iter = max_iter
-        self.tol = tol
-        self._to_similarity = to_similarity
-
-    def _cost_matrices(self, x: np.ndarray, y: np.ndarray):
-        cx = cdist(x, x, metric=self.intra_metric).astype(np.float64)
-        cy = cdist(y, y, metric=self.intra_metric).astype(np.float64)
-        cx /= np.median(cx)
-        cy /= np.median(cy)
-        return cx, cy
-
-    def compute_similarity(self, x: np.ndarray, y: np.ndarray) -> float:
-        cx, cy = self._cost_matrices(x, y)
-        p = np.ones(cx.shape[0]) / cx.shape[0]
-        q = np.ones(cy.shape[0]) / cy.shape[0]
-        gw_dist = ot.gromov.gromov_wasserstein2(
-            cx,
-            cy,
-            p,
-            q,
-            loss_fun=self.loss_fun,
-            epsilon=self.reg,
-            max_iter=self.max_iter,
-            tol=self.tol,
-            verbose=False,
-            log=False,
-        )
-        return float(self._to_similarity(gw_dist))
-
-
 class KLDivergence:
     def __init__(self, epsilon: float = 1e-8, symmetric: bool = True):
         self.epsilon = epsilon
@@ -353,36 +290,3 @@ def transform_rows_for_plot(rows: List[dict], lower_better_metrics: Iterable[str
         for idx in range(len(transformed)):
             transformed[idx][metric_name] = float(sim_vals[idx])
     return transformed
-
-
-def plot_grouped_bars(
-    rows: List[dict],
-    title: str,
-    metric_names: Iterable[str] = HIGHER_BETTER_METRICS + LOWER_BETTER_METRICS,
-):
-    rows_plot = transform_rows_for_plot(rows)
-    plot_layers = [row["layer"] for row in rows_plot]
-    layer_to_row = {row["layer"]: row for row in rows_plot}
-
-    fig, ax = plt.subplots(1, 1, figsize=(18, 6), constrained_layout=True)
-    x = np.arange(len(tuple(metric_names)), dtype=np.float64)
-    n_layers = len(plot_layers)
-    total_group_width = 0.84
-    bar_width = total_group_width / n_layers
-    offsets = (np.arange(n_layers) - (n_layers - 1) / 2.0) * bar_width
-
-    metric_names = list(metric_names)
-    for idx, layer in enumerate(plot_layers):
-        values = [layer_to_row[layer][metric_name] for metric_name in metric_names]
-        ax.bar(x + offsets[idx], values, width=bar_width, label=layer)
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(metric_names, rotation=20)
-    ax.set_title(f"{title} (all metrics scaled to higher = more similar)")
-    ax.set_xlabel("Metric")
-    ax.set_ylabel("Similarity")
-    ax.grid(axis="y", alpha=0.3)
-
-    handles, labels = ax.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=3, frameon=True)
-    return fig

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -276,30 +276,3 @@ def run_scrub_unlearning(
     }
 
 
-def run_scrub_snapshots(
-    model_factory: Callable[[], nn.Module],
-    original_checkpoint_path: str,
-    forget_loader,
-    retain_loader,
-    testloader,
-    device: torch.device,
-    snapshot_dir: str,
-    final_checkpoint_path: Optional[str] = None,
-    config: Optional[SCRUBConfig] = None,
-    num_classes: int = 10,
-) -> str:
-    model = model_factory()
-    model.load_state_dict(torch.load(original_checkpoint_path, map_location=device))
-    result = run_scrub_unlearning(
-        model,
-        forget_loader,
-        retain_loader,
-        testloader,
-        device,
-        config=config,
-        num_classes=num_classes,
-        snapshot_dir=snapshot_dir,
-    )
-    if final_checkpoint_path is not None:
-        torch.save(result["model"].state_dict(), final_checkpoint_path)
-    return snapshot_dir
