@@ -82,6 +82,17 @@ class SweepRunSummary:
     worst_retain_accuracy: float
 
 
+@dataclass(frozen=True)
+class ScrubSweepRankedRow:
+    rank: int
+    frog_suppression_percent: float
+    mean_retain_accuracy: float
+    runtime_seconds: float
+    config_label: str
+    forget_class_accuracy: float
+    worst_retain_accuracy: float
+
+
 def build_default_core_config(
     num_classes: int = 10,
     model_depth: int = 50,
@@ -346,6 +357,168 @@ def run_fixed_budget_ssd_scrub_sweeps(
                 }
             )
     return str(csv_path), summaries
+
+
+def run_targeted_scrub_relearning_sweep(
+    runtime: NotebookRuntime,
+    original_checkpoint_path: str,
+    scrub_betas: Sequence[float] = (0.4, 0.8),
+    scrub_recovery_beta_scales: Sequence[float] = (0.15, 0.35),
+    scrub_recovery_forget_caps: Sequence[int] = (1, 3),
+    scrub_retain_caps: Sequence[int] = (10, 20),
+    scrub_forget_caps: Sequence[int] = (3, 6),
+    scrub_gammas: Sequence[float] = (2.0, 3.0),
+) -> tuple[str, list[ScrubSweepRankedRow]]:
+    """Run a small SCRUB-only grid focused on forget-then-relearn failure points.
+
+    Ranking order:
+    1) stronger frog suppression (higher is better),
+    2) higher mean retain accuracy,
+    3) lower runtime.
+    """
+    target_label = runtime.core_config.target_label
+    forget_subset, retain_subset = make_forget_retain_subsets(runtime.trainset, target_label)
+    batch_size = runtime.core_config.unlearn_batch_size or 256
+
+    test_loader = make_loader(
+        runtime.testset,
+        batch_size=min(256, batch_size),
+        shuffle=False,
+        num_workers=runtime.num_workers,
+        use_cuda=runtime.use_cuda,
+    )
+    forget_loader = make_loader(
+        forget_subset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=runtime.num_workers,
+        use_cuda=runtime.use_cuda,
+    )
+    retain_loader = make_loader(
+        retain_subset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=runtime.num_workers,
+        use_cuda=runtime.use_cuda,
+    )
+
+    base_scrub = runtime.core_config.scrub_config
+    rows: list[dict[str, float | str]] = []
+
+    for beta, recovery_beta_scale, recovery_forget_cap, retain_cap, forget_cap, gamma in itertools.product(
+        scrub_betas,
+        scrub_recovery_beta_scales,
+        scrub_recovery_forget_caps,
+        scrub_retain_caps,
+        scrub_forget_caps,
+        scrub_gammas,
+    ):
+        model = runtime.model_factory()
+        model.load_state_dict(torch.load(original_checkpoint_path, map_location=runtime.device))
+        config = SCRUBConfig(
+            lr=base_scrub.lr,
+            epochs=base_scrub.epochs,
+            forget_phase_epochs=base_scrub.forget_phase_epochs,
+            max_forget_batches_per_epoch=int(forget_cap),
+            max_retain_batches_per_epoch=int(retain_cap),
+            recovery_beta_scale=float(recovery_beta_scale),
+            recovery_max_forget_batches_per_epoch=int(recovery_forget_cap),
+            alpha=base_scrub.alpha,
+            beta=float(beta),
+            gamma=float(gamma),
+            temperature=base_scrub.temperature,
+            weight_decay=base_scrub.weight_decay,
+            batch_size=base_scrub.batch_size,
+            grad_clip_norm=base_scrub.grad_clip_norm,
+            freeze_bn=base_scrub.freeze_bn,
+            reset_optimizer_after_forget=base_scrub.reset_optimizer_after_forget,
+        )
+
+        t0 = time.perf_counter()
+        result = run_scrub_unlearning(
+            model,
+            forget_loader,
+            retain_loader,
+            test_loader,
+            runtime.device,
+            config=config,
+            num_classes=runtime.num_classes,
+            snapshot_dir=None,
+        )
+        runtime_seconds = time.perf_counter() - t0
+        forget_acc, mean_retain, worst_retain = _summarize_unlearned_model(
+            result["model"],
+            test_loader,
+            runtime.device,
+            target_label=target_label,
+            num_classes=runtime.num_classes,
+        )
+        frog_suppression = 100.0 - forget_acc
+        config_label = (
+            f"beta={beta},recovery_beta={recovery_beta_scale},recovery_forget_cap={recovery_forget_cap},"
+            f"retain_cap={retain_cap},forget_cap={forget_cap},gamma={gamma}"
+        )
+        rows.append(
+            {
+                "frog_suppression_percent": float(frog_suppression),
+                "mean_retain_accuracy": float(mean_retain),
+                "runtime_seconds": float(runtime_seconds),
+                "config_label": config_label,
+                "forget_class_accuracy": float(forget_acc),
+                "worst_retain_accuracy": float(worst_retain),
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            -float(row["frog_suppression_percent"]),
+            -float(row["mean_retain_accuracy"]),
+            float(row["runtime_seconds"]),
+        )
+    )
+
+    ranked_rows: list[ScrubSweepRankedRow] = []
+    for idx, row in enumerate(rows, start=1):
+        ranked_rows.append(
+            ScrubSweepRankedRow(
+                rank=idx,
+                frog_suppression_percent=float(row["frog_suppression_percent"]),
+                mean_retain_accuracy=float(row["mean_retain_accuracy"]),
+                runtime_seconds=float(row["runtime_seconds"]),
+                config_label=str(row["config_label"]),
+                forget_class_accuracy=float(row["forget_class_accuracy"]),
+                worst_retain_accuracy=float(row["worst_retain_accuracy"]),
+            )
+        )
+
+    csv_path = Path(runtime.out_dir) / "targeted_scrub_relearning_sweep_ranked.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "rank",
+                "frog_suppression_percent",
+                "mean_retain_accuracy",
+                "runtime_seconds",
+                "config_label",
+                "forget_class_accuracy",
+                "worst_retain_accuracy",
+            ],
+        )
+        writer.writeheader()
+        for row in ranked_rows:
+            writer.writerow(
+                {
+                    "rank": row.rank,
+                    "frog_suppression_percent": row.frog_suppression_percent,
+                    "mean_retain_accuracy": row.mean_retain_accuracy,
+                    "runtime_seconds": row.runtime_seconds,
+                    "config_label": row.config_label,
+                    "forget_class_accuracy": row.forget_class_accuracy,
+                    "worst_retain_accuracy": row.worst_retain_accuracy,
+                }
+            )
+    return str(csv_path), ranked_rows
 
 
 def prepare_notebook_runtime(
