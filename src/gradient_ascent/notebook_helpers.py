@@ -326,6 +326,7 @@ def run_and_display_notebook_core_pipeline(
     reuse_original_checkpoint: Optional[bool] = None,
     reuse_retrained_checkpoint: Optional[bool] = None,
     reuse_unlearned_checkpoints: Optional[bool] = None,
+    run_diagnostics: bool = True,
 ):
     """Run the full core experiment and render notebook outputs inline.
 
@@ -333,7 +334,7 @@ def run_and_display_notebook_core_pipeline(
     - core checkpoint/original/retrained training,
     - all five unlearning baselines,
     - runtime and summary prints,
-    - GA/SCRUB diagnostic exports and plots.
+    - optional GA/SCRUB diagnostic exports and plots.
     """
     from IPython.display import Image as IPyImage, display
 
@@ -362,25 +363,28 @@ def run_and_display_notebook_core_pipeline(
     print(f"Saved unlearning runtime plot to {core_artifacts.unlearning_runtime_plot_path}")
     display(IPyImage(filename=core_artifacts.unlearning_runtime_plot_path))
 
-    ga_csv_path, ga_plot_path = save_ga_diagnostics(
-        runtime,
-        core_artifacts,
-        wandb_run=wandb_run,
-        wandb_module=wandb_module,
-    )
-    print(f"Saved GA diagnostics CSV to {ga_csv_path}")
-    print(f"Saved GA diagnostics plot to {ga_plot_path}")
-    display(IPyImage(filename=ga_plot_path))
+    if run_diagnostics:
+        ga_csv_path, ga_plot_path = save_ga_diagnostics(
+            runtime,
+            core_artifacts,
+            wandb_run=wandb_run,
+            wandb_module=wandb_module,
+        )
+        print(f"Saved GA diagnostics CSV to {ga_csv_path}")
+        print(f"Saved GA diagnostics plot to {ga_plot_path}")
+        display(IPyImage(filename=ga_plot_path))
 
-    scrub_csv_path, scrub_plot_path = save_scrub_diagnostics(
-        runtime,
-        core_artifacts,
-        wandb_run=wandb_run,
-        wandb_module=wandb_module,
-    )
-    print(f"Saved SCRUB diagnostics CSV to {scrub_csv_path}")
-    print(f"Saved SCRUB diagnostics plot to {scrub_plot_path}")
-    display(IPyImage(filename=scrub_plot_path))
+        scrub_csv_path, scrub_plot_path = save_scrub_diagnostics(
+            runtime,
+            core_artifacts,
+            wandb_run=wandb_run,
+            wandb_module=wandb_module,
+        )
+        print(f"Saved SCRUB diagnostics CSV to {scrub_csv_path}")
+        print(f"Saved SCRUB diagnostics plot to {scrub_plot_path}")
+        display(IPyImage(filename=scrub_plot_path))
+    else:
+        print("Skipped GA/SCRUB diagnostics (run_diagnostics=False).")
 
     return core_artifacts, wandb_run
 

@@ -565,21 +565,32 @@ def run_trajectory_analysis(
     wandb_run=None,
     wandb_module=None,
 ) -> TrajectoryExperimentArtifacts:
+    overall_t0 = time.perf_counter()
+    print("[Trajectory] Starting trajectory analysis pipeline...")
     for path in [original_checkpoint_path, retrained_checkpoint_path]:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing checkpoint: {path}")
 
+    t0 = time.perf_counter()
     testloader = make_loader(testset, config.trajectory_batch_size, False, num_workers, use_cuda)
+    print(
+        "[Trajectory] Built test loader "
+        f"(batch_size={config.trajectory_batch_size}) in {time.perf_counter() - t0:.1f}s"
+    )
 
+    t0 = time.perf_counter()
     retrained_model = model_factory()
     retrained_model.load_state_dict(torch.load(retrained_checkpoint_path, map_location=device))
     retrained_model.eval()
     retrained_acts = activation_collector(retrained_model, testloader)
+    print(f"[Trajectory] Collected retrained reference activations in {time.perf_counter() - t0:.1f}s")
 
+    t0 = time.perf_counter()
     original_model = model_factory()
     original_model.load_state_dict(torch.load(original_checkpoint_path, map_location=device))
     original_model.eval()
     original_acts = activation_collector(original_model, testloader)
+    print(f"[Trajectory] Collected original reference activations in {time.perf_counter() - t0:.1f}s")
 
     reference_map = {
         "retrained": retrained_acts,
@@ -590,8 +601,12 @@ def run_trajectory_analysis(
     metric_names = list(metric_names)
     lower_better_metrics = list(lower_better_metrics)
     for algorithm_key, snapshot_dir in snapshot_dirs.items():
+        algo_t0 = time.perf_counter()
+        print(f"[Trajectory] Similarity stage for {algorithm_key.upper()}...")
         similarity_artifacts[algorithm_key] = {}
         for reference_key, reference_acts in reference_map.items():
+            ref_t0 = time.perf_counter()
+            print(f"[Trajectory]   {algorithm_key.upper()} vs {reference_key.capitalize()} starting...")
             epoch_rows = compute_epoch_rows_from_snapshots(
                 snapshot_dir,
                 model_factory,
@@ -642,7 +657,16 @@ def run_trajectory_analysis(
                 summary_plot_path=summary_plot_path,
                 evolving_bar_plot_path=evolving_bar_plot_path,
             )
+            print(
+                f"[Trajectory]   {algorithm_key.upper()} vs {reference_key.capitalize()} done "
+                f"in {time.perf_counter() - ref_t0:.1f}s"
+            )
+        print(
+            f"[Trajectory] Similarity stage for {algorithm_key.upper()} finished "
+            f"in {time.perf_counter() - algo_t0:.1f}s"
+        )
 
+    t0 = time.perf_counter()
     forget_subset, _retain_subset = make_forget_retain_subsets(trainset, config.target_label)
     forget_member_subset, forget_nonmember_subset, forget_n = sample_balanced_class_subsets(
         trainset,
@@ -678,7 +702,9 @@ def run_trajectory_analysis(
         f"MIA probes ready | forget(frog={config.target_label}): {forget_n} member + {forget_n} non-member | "
         f"retain(label={config.retain_control_label}): {retain_n} member + {retain_n} non-member"
     )
+    print(f"[Trajectory] Prepared MIA subsets/loaders in {time.perf_counter() - t0:.1f}s")
 
+    t0 = time.perf_counter()
     retrained_mia_model = model_factory()
     retrained_mia_model.load_state_dict(torch.load(retrained_checkpoint_path, map_location=device))
     retrained_mia_model.eval()
@@ -702,6 +728,7 @@ def run_trajectory_analysis(
                 )
             }
         )
+    print(f"[Trajectory] Computed/logged retrained MIA baseline in {time.perf_counter() - t0:.1f}s")
 
     mia_panel_metrics = [
         ("forget_loss_auc", "Loss-threshold AUC (lower = less inferable)"),
@@ -712,6 +739,8 @@ def run_trajectory_analysis(
 
     mia_artifacts: Dict[str, MIAArtifact] = {}
     for algorithm_key, snapshot_dir in snapshot_dirs.items():
+        mia_t0 = time.perf_counter()
+        print(f"[Trajectory] MIA trajectory for {algorithm_key.upper()}...")
         rows = compute_mia_trajectory_rows(
             snapshot_dir,
             model_factory,
@@ -749,7 +778,12 @@ def run_trajectory_analysis(
             grid_plot_path=grid_plot_path,
             control_plot_path=control_plot_path,
         )
+        print(
+            f"[Trajectory] MIA trajectory for {algorithm_key.upper()} finished "
+            f"in {time.perf_counter() - mia_t0:.1f}s"
+        )
 
+    print(f"[Trajectory] Full trajectory analysis completed in {time.perf_counter() - overall_t0:.1f}s")
     return TrajectoryExperimentArtifacts(
         similarity_artifacts=similarity_artifacts,
         mia_artifacts=mia_artifacts,
