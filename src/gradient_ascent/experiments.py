@@ -29,7 +29,11 @@ from .reporting import (
     save_similarity_trajectory_csv,
     save_unlearning_runtime_bar_plot,
 )
-from .trajectories import compute_epoch_rows_from_snapshots, save_combined_similarity_mia_plot, save_similarity_heatmap_grid
+from .trajectories import (
+    compute_epoch_rows_from_snapshots,
+    save_combined_similarity_mia_plot,
+    save_similarity_evolving_bar_plot,
+)
 from .training import evaluate, train_model
 from .unlearning import (
     CertifiedConfig,
@@ -114,7 +118,7 @@ class TrajectoryExperimentConfig:
 class SimilarityArtifact:
     csv_path: str
     summary_plot_path: str
-    heatmap_plot_path: str
+    evolving_bar_plot_path: str
 
 
 @dataclass(frozen=True)
@@ -221,6 +225,7 @@ def run_core_checkpoints(
     reuse_existing_checkpoints: bool = False,
     reuse_original_checkpoint: Optional[bool] = None,
     reuse_retrained_checkpoint: Optional[bool] = None,
+    reuse_unlearned_checkpoints: Optional[bool] = None,
     wandb_run=None,
     wandb_module=None,
 ) -> CoreExperimentArtifacts:
@@ -239,6 +244,9 @@ def run_core_checkpoints(
     reuse_original = reuse_existing_checkpoints if reuse_original_checkpoint is None else reuse_original_checkpoint
     reuse_retrained = (
         reuse_existing_checkpoints if reuse_retrained_checkpoint is None else reuse_retrained_checkpoint
+    )
+    reuse_unlearned = (
+        reuse_existing_checkpoints if reuse_unlearned_checkpoints is None else reuse_unlearned_checkpoints
     )
 
     original_model = model_factory()
@@ -318,109 +326,137 @@ def run_core_checkpoints(
     )
 
     unlearning_runtime_seconds: Dict[str, float] = {}
+    baseline_results: Dict[str, dict] = {}
+    algorithm_artifacts: Dict[str, AlgorithmArtifacts] = {}
 
-    ga_model = model_factory()
-    ga_model.load_state_dict(torch.load(original_path, map_location=device))
-    print("[Core] Running GA unlearning...")
-    t0 = time.perf_counter()
-    ga_result = run_ga_unlearning(
-        ga_model,
-        forget_loader,
-        testloader,
-        device,
-        config=config.ga_config,
-        num_classes=config.num_classes,
-        snapshot_dir=f"{config.out_dir}/unlearning_snapshots_ga",
-    )
-    unlearning_runtime_seconds["ga"] = time.perf_counter() - t0
-    torch.save(ga_result["model"].state_dict(), f"{config.out_dir}/unlearned_net.pt")
-    torch.save(ga_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_ga.pt")
-    print("[Core] GA complete")
+    def _algorithm_artifact_paths(algorithm_key: str) -> AlgorithmArtifacts:
+        return AlgorithmArtifacts(
+            snapshot_dir=f"{config.out_dir}/unlearning_snapshots_{algorithm_key}",
+            final_checkpoint_path=f"{config.out_dir}/unlearned_net_{algorithm_key}.pt",
+            classwise_history_csv_path=f"{config.out_dir}/classwise_accuracy_{algorithm_key}.csv",
+            classwise_percent_plot_path=f"{config.out_dir}/classwise_percent_change_{algorithm_key}.png",
+            classwise_absolute_plot_path=f"{config.out_dir}/classwise_absolute_accuracy_{algorithm_key}.png",
+        )
 
-    ssd_model = model_factory()
-    ssd_model.load_state_dict(torch.load(original_path, map_location=device))
-    print("[Core] Running SSD unlearning...")
-    t0 = time.perf_counter()
-    ssd_result = run_ssd_unlearning(
-        ssd_model,
-        forget_loader,
-        retain_loader,
-        testloader,
-        device,
-        config=config.ssd_config,
-        num_classes=config.num_classes,
-        snapshot_dir=f"{config.out_dir}/unlearning_snapshots_ssd",
-    )
-    unlearning_runtime_seconds["ssd"] = time.perf_counter() - t0
-    torch.save(ssd_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_ssd.pt")
-    print("[Core] SSD complete")
+    def _can_reuse_algorithm_outputs(artifact: AlgorithmArtifacts) -> bool:
+        if not os.path.exists(artifact.final_checkpoint_path):
+            return False
+        if not os.path.isdir(artifact.snapshot_dir):
+            return False
+        if not any(name.startswith("epoch_") and name.endswith(".pt") for name in os.listdir(artifact.snapshot_dir)):
+            return False
+        required_files = [
+            artifact.classwise_history_csv_path,
+            artifact.classwise_percent_plot_path,
+            artifact.classwise_absolute_plot_path,
+        ]
+        return all(os.path.exists(path) for path in required_files)
 
-    salun_model = model_factory()
-    salun_model.load_state_dict(torch.load(original_path, map_location=device))
-    print("[Core] Running SalUn unlearning...")
-    t0 = time.perf_counter()
-    salun_result = run_salun_unlearning(
-        salun_model,
-        forget_loader,
-        retain_loader,
-        testloader,
-        device,
-        config=config.salun_config,
-        num_classes=config.num_classes,
-        snapshot_dir=f"{config.out_dir}/unlearning_snapshots_salun",
-    )
-    unlearning_runtime_seconds["salun"] = time.perf_counter() - t0
-    torch.save(salun_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_salun.pt")
-    print("[Core] SalUn complete")
+    def _load_reused_result(algorithm_key: str, artifact: AlgorithmArtifacts) -> dict:
+        model = model_factory()
+        model.load_state_dict(torch.load(artifact.final_checkpoint_path, map_location=device))
+        print(f"[Core] Reused cached {algorithm_key.upper()} outputs from {artifact.final_checkpoint_path}")
+        return {"model": model}
 
-    certified_model = model_factory()
-    certified_model.load_state_dict(torch.load(original_path, map_location=device))
-    print("[Core] Running Certified Removal unlearning...")
-    t0 = time.perf_counter()
-    certified_result = run_certified_unlearning(
-        certified_model,
-        forget_loader,
-        retain_loader,
-        testloader,
-        device,
-        config=config.certified_config,
-        num_classes=config.num_classes,
-        snapshot_dir=f"{config.out_dir}/unlearning_snapshots_certified",
-    )
-    unlearning_runtime_seconds["certified"] = time.perf_counter() - t0
-    torch.save(certified_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_certified.pt")
-    print("[Core] Certified Removal complete")
+    for algorithm_key in ["ga", "ssd", "salun", "certified", "scrub"]:
+        artifact = _algorithm_artifact_paths(algorithm_key)
+        if reuse_unlearned and _can_reuse_algorithm_outputs(artifact):
+            baseline_results[algorithm_key] = _load_reused_result(algorithm_key, artifact)
+            algorithm_artifacts[algorithm_key] = artifact
+            unlearning_runtime_seconds[algorithm_key] = 0.0
+            continue
 
-    scrub_model = model_factory()
-    scrub_model.load_state_dict(torch.load(original_path, map_location=device))
-    print("[Core] Running SCRUB unlearning...")
-    t0 = time.perf_counter()
-    scrub_result = run_scrub_unlearning(
-        scrub_model,
-        scrub_forget_loader,
-        scrub_retain_loader,
-        testloader,
-        device,
-        config=config.scrub_config,
-        num_classes=config.num_classes,
-        snapshot_dir=f"{config.out_dir}/unlearning_snapshots_scrub",
-    )
-    unlearning_runtime_seconds["scrub"] = time.perf_counter() - t0
-    torch.save(scrub_result["model"].state_dict(), f"{config.out_dir}/unlearned_net_scrub.pt")
-    print("[Core] SCRUB complete")
+        t0 = time.perf_counter()
+        if algorithm_key == "ga":
+            ga_model = model_factory()
+            ga_model.load_state_dict(torch.load(original_path, map_location=device))
+            print("[Core] Running GA unlearning...")
+            result = run_ga_unlearning(
+                ga_model,
+                forget_loader,
+                testloader,
+                device,
+                config=config.ga_config,
+                num_classes=config.num_classes,
+                snapshot_dir=artifact.snapshot_dir,
+            )
+            torch.save(result["model"].state_dict(), f"{config.out_dir}/unlearned_net.pt")
+            print("[Core] GA complete")
+            label = "GA"
+        elif algorithm_key == "ssd":
+            ssd_model = model_factory()
+            ssd_model.load_state_dict(torch.load(original_path, map_location=device))
+            print("[Core] Running SSD unlearning...")
+            result = run_ssd_unlearning(
+                ssd_model,
+                forget_loader,
+                retain_loader,
+                testloader,
+                device,
+                config=config.ssd_config,
+                num_classes=config.num_classes,
+                snapshot_dir=artifact.snapshot_dir,
+            )
+            print("[Core] SSD complete")
+            label = "SSD"
+        elif algorithm_key == "salun":
+            salun_model = model_factory()
+            salun_model.load_state_dict(torch.load(original_path, map_location=device))
+            print("[Core] Running SalUn unlearning...")
+            result = run_salun_unlearning(
+                salun_model,
+                forget_loader,
+                retain_loader,
+                testloader,
+                device,
+                config=config.salun_config,
+                num_classes=config.num_classes,
+                snapshot_dir=artifact.snapshot_dir,
+            )
+            print("[Core] SalUn complete")
+            label = "SalUn"
+        elif algorithm_key == "certified":
+            certified_model = model_factory()
+            certified_model.load_state_dict(torch.load(original_path, map_location=device))
+            print("[Core] Running Certified Removal unlearning...")
+            result = run_certified_unlearning(
+                certified_model,
+                forget_loader,
+                retain_loader,
+                testloader,
+                device,
+                config=config.certified_config,
+                num_classes=config.num_classes,
+                snapshot_dir=artifact.snapshot_dir,
+            )
+            print("[Core] Certified Removal complete")
+            label = "Certified"
+        else:
+            scrub_model = model_factory()
+            scrub_model.load_state_dict(torch.load(original_path, map_location=device))
+            print("[Core] Running SCRUB unlearning...")
+            result = run_scrub_unlearning(
+                scrub_model,
+                scrub_forget_loader,
+                scrub_retain_loader,
+                testloader,
+                device,
+                config=config.scrub_config,
+                num_classes=config.num_classes,
+                snapshot_dir=artifact.snapshot_dir,
+            )
+            print("[Core] SCRUB complete")
+            label = "SCRUB"
 
-    algorithm_artifacts = {
-        "ga": _save_classwise_artifacts("ga", "GA", ga_result["classwise_history"], config),
-        "ssd": _save_classwise_artifacts("ssd", "SSD", ssd_result["classwise_history"], config),
-        "salun": _save_classwise_artifacts("salun", "SalUn", salun_result["classwise_history"], config),
-        "certified": _save_classwise_artifacts(
-            "certified",
-            "Certified",
-            certified_result["classwise_history"],
+        unlearning_runtime_seconds[algorithm_key] = time.perf_counter() - t0
+        torch.save(result["model"].state_dict(), artifact.final_checkpoint_path)
+        baseline_results[algorithm_key] = result
+        algorithm_artifacts[algorithm_key] = _save_classwise_artifacts(
+            algorithm_key,
+            label,
+            result["classwise_history"],
             config,
-        ),
-        "scrub": _save_classwise_artifacts("scrub", "SCRUB", scrub_result["classwise_history"], config),
-    }
+        )
     for algorithm_key, artifact in algorithm_artifacts.items():
         _log_media(wandb_run, wandb_module, f"plots/classwise_percent_change_{algorithm_key}", artifact.classwise_percent_plot_path)
         _log_media(
@@ -482,13 +518,6 @@ def run_core_checkpoints(
         "retrain_overall_acc": float(retrained_overall),
         f"class_{config.target_label}_original_acc": float(original_per[config.target_label]),
         f"class_{config.target_label}_retrain_acc": float(retrained_per[config.target_label]),
-    }
-    baseline_results = {
-        "ga": ga_result,
-        "ssd": ssd_result,
-        "salun": salun_result,
-        "certified": certified_result,
-        "scrub": scrub_result,
     }
     for algorithm_key, result in baseline_results.items():
         overall_acc, per_class_acc = evaluate(
@@ -575,8 +604,8 @@ def run_trajectory_analysis(
             summary_plot_path = (
                 f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_summary.png"
             )
-            heatmap_plot_path = (
-                f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_heatmap.png"
+            evolving_bar_plot_path = (
+                f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_evolving_bars.gif"
             )
 
             save_similarity_trajectory_csv(epoch_rows, csv_path, metric_names)
@@ -588,12 +617,11 @@ def run_trajectory_analysis(
                 metric_names,
                 lower_better_metrics,
             )
-            save_similarity_heatmap_grid(
+            save_similarity_evolving_bar_plot(
                 epoch_rows,
-                heatmap_plot_path,
+                evolving_bar_plot_path,
                 algorithm_key,
                 reference_key,
-                layer_names,
                 metric_names,
                 lower_better_metrics,
             )
@@ -606,13 +634,13 @@ def run_trajectory_analysis(
             _log_media(
                 wandb_run,
                 wandb_module,
-                f"plots/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_heatmap",
-                heatmap_plot_path,
+                f"plots/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_evolving_bars",
+                evolving_bar_plot_path,
             )
             similarity_artifacts[algorithm_key][reference_key] = SimilarityArtifact(
                 csv_path=csv_path,
                 summary_plot_path=summary_plot_path,
-                heatmap_plot_path=heatmap_plot_path,
+                evolving_bar_plot_path=evolving_bar_plot_path,
             )
 
     forget_subset, _retain_subset = make_forget_retain_subsets(trainset, config.target_label)

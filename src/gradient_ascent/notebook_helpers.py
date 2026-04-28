@@ -203,6 +203,7 @@ def run_notebook_core_experiment(
     reuse_existing_checkpoints: bool = False,
     reuse_original_checkpoint: Optional[bool] = None,
     reuse_retrained_checkpoint: Optional[bool] = None,
+    reuse_unlearned_checkpoints: Optional[bool] = None,
 ) -> tuple[CoreExperimentArtifacts, object]:
     wandb_run = ensure_wandb_run(
         wandb_module,
@@ -221,6 +222,7 @@ def run_notebook_core_experiment(
         reuse_existing_checkpoints=reuse_existing_checkpoints,
         reuse_original_checkpoint=reuse_original_checkpoint,
         reuse_retrained_checkpoint=reuse_retrained_checkpoint,
+        reuse_unlearned_checkpoints=reuse_unlearned_checkpoints,
         wandb_run=wandb_run,
         wandb_module=wandb_module,
     )
@@ -323,6 +325,7 @@ def run_and_display_notebook_core_pipeline(
     reuse_existing_checkpoints: bool = False,
     reuse_original_checkpoint: Optional[bool] = None,
     reuse_retrained_checkpoint: Optional[bool] = None,
+    reuse_unlearned_checkpoints: Optional[bool] = None,
 ):
     """Run the full core experiment and render notebook outputs inline.
 
@@ -340,6 +343,7 @@ def run_and_display_notebook_core_pipeline(
         reuse_existing_checkpoints=reuse_existing_checkpoints,
         reuse_original_checkpoint=reuse_original_checkpoint,
         reuse_retrained_checkpoint=reuse_retrained_checkpoint,
+        reuse_unlearned_checkpoints=reuse_unlearned_checkpoints,
     )
 
     display(IPyImage(filename=core_artifacts.original_vs_retrain_plot_path))
@@ -404,7 +408,7 @@ def run_and_display_notebook_trajectory_pipeline(
         for reference_key in ["retrained", "original"]:
             similarity_artifact = trajectory_artifacts.similarity_artifacts[algorithm_key][reference_key]
             display(IPyImage(filename=similarity_artifact.summary_plot_path))
-            display(IPyImage(filename=similarity_artifact.heatmap_plot_path))
+            display(IPyImage(filename=similarity_artifact.evolving_bar_plot_path))
 
     return trajectory_artifacts, trajectory_wandb_run
 

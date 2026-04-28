@@ -4,6 +4,7 @@ import os
 from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.animation import PillowWriter
 import numpy as np
 import torch
 
@@ -50,63 +51,48 @@ def compute_epoch_rows_from_snapshots(
     return sorted(epoch_rows, key=lambda item: item[0])
 
 
-def save_similarity_heatmap_grid(
+def save_similarity_evolving_bar_plot(
     epoch_rows: EpochRows,
     out_path: str,
     algorithm_key: str,
     reference_key: str,
-    layer_names: Iterable[str],
     metric_names: Iterable[str],
     lower_better_metrics: Iterable[str],
 ) -> str:
-    layer_names = list(layer_names)
     metric_names = list(metric_names)
     oriented_rows = orient_epoch_rows_for_similarity(epoch_rows, metric_names, lower_better_metrics)
-    epochs = [epoch for epoch, _ in oriented_rows]
+    if not oriented_rows:
+        raise RuntimeError("Cannot create evolving similarity bar plot: epoch_rows is empty.")
 
-    matrices = {metric_name: np.zeros((len(layer_names), len(epochs)), dtype=np.float64) for metric_name in metric_names}
-    layer_to_idx = {layer_name: idx for idx, layer_name in enumerate(layer_names)}
-    for epoch_idx, (_epoch, rows) in enumerate(oriented_rows):
-        for row in rows:
-            layer_idx = layer_to_idx[row["layer"]]
-            for metric_name in metric_names:
-                matrices[metric_name][layer_idx, epoch_idx] = float(row[metric_name])
+    # Mean over layers at each step gives a compact per-metric trajectory frame.
+    mean_values_by_epoch: list[tuple[int, np.ndarray]] = []
+    for epoch_num, rows in oriented_rows:
+        metric_means = []
+        for metric_name in metric_names:
+            values = np.array([float(row[metric_name]) for row in rows], dtype=np.float64)
+            metric_means.append(float(np.mean(values)))
+        mean_values_by_epoch.append((epoch_num, np.array(metric_means, dtype=np.float64)))
 
-    n_metrics = len(metric_names)
-    n_cols = min(2, n_metrics)
-    n_rows = int(np.ceil(n_metrics / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 4.3 * n_rows), constrained_layout=True)
-    axes = np.array(axes).reshape(-1)
+    x_positions = np.arange(len(metric_names))
+    fig, ax = plt.subplots(1, 1, figsize=(12, 5), constrained_layout=True)
+    writer = PillowWriter(fps=1)
+    with writer.saving(fig, out_path, dpi=160):
+        for epoch_num, mean_values in mean_values_by_epoch:
+            ax.clear()
+            colors = ["#4c72b0" for _ in metric_names]
+            ax.bar(x_positions, mean_values, color=colors)
+            ax.set_title(
+                f"{algorithm_key.upper()} vs {reference_key.capitalize()} | "
+                f"Unlearning step {epoch_num} (mean across layers)"
+            )
+            ax.set_xlabel("Similarity metric")
+            ax.set_ylabel("Similarity to reference")
+            ax.set_ylim(0.0, 1.02)
+            ax.set_xticks(x_positions)
+            ax.set_xticklabels(metric_names, rotation=20, ha="right")
+            ax.grid(axis="y", alpha=0.3)
+            writer.grab_frame()
 
-    for idx, metric_name in enumerate(metric_names):
-        ax = axes[idx]
-        im = ax.imshow(
-            matrices[metric_name],
-            aspect="auto",
-            cmap="viridis",
-            vmin=0.0,
-            vmax=1.0,
-            origin="lower",
-            interpolation="nearest",
-        )
-        ax.set_title(metric_name)
-        ax.set_xlabel("Unlearning step")
-        ax.set_ylabel("Layer")
-        ax.set_xticks(range(len(epochs)))
-        ax.set_xticklabels(epochs)
-        ax.set_yticks(range(len(layer_names)))
-        ax.set_yticklabels(layer_names)
-        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label("Similarity")
-
-    for idx in range(n_metrics, len(axes)):
-        axes[idx].axis("off")
-
-    fig.suptitle(
-        f"{algorithm_key.upper()} vs {reference_key.capitalize()} across layers\n"
-        "(all metrics scaled to higher = more similar)"
-    )
-    fig.savefig(out_path, dpi=180)
     plt.close(fig)
     return out_path
 
