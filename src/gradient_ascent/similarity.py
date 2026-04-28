@@ -53,6 +53,24 @@ class CCA:
         return mean_correlation
 
 
+def linear_cka_doubly_centered_gram(x: np.ndarray, y: np.ndarray) -> float:
+    """Linear CKA with the same doubly-centered Gram definition as the legacy path.
+
+    Uses the Frobenius formulation from Kornblith et al. (2019), "Similarity of Neural
+    Network Representations Revisited" (arXiv:1905.00414), avoiding materialising the
+    n×n Gram matrices ``x @ x.T`` and ``y @ y.T``. Rows of ``x`` and ``y`` must be paired
+    (same batch order). Complexity is O(n d_x d_y + n d_x^2 + n d_y^2) instead of O(n^2 d).
+    """
+    xc = x - x.mean(axis=0, keepdims=True)
+    yc = y - y.mean(axis=0, keepdims=True)
+    cross = xc.T @ yc
+    num = float(np.sum(cross * cross))
+    x_cov = xc.T @ xc
+    y_cov = yc.T @ yc
+    den = float(np.linalg.norm(x_cov, ord="fro") * np.linalg.norm(y_cov, ord="fro"))
+    return num / den if den > 0.0 else 0.0
+
+
 class CKA:
     def __init__(self, kernel: str = "linear"):
         self.kernel = kernel
@@ -60,9 +78,6 @@ class CKA:
     def _center_gram(self, gram: np.ndarray) -> np.ndarray:
         means = gram.mean(axis=0, keepdims=True)
         return gram - means - means.T + means.mean()
-
-    def _linear_kernel(self, x: np.ndarray) -> np.ndarray:
-        return x @ x.T
 
     def _rbf_kernel(self, x: np.ndarray, sigma: Optional[float] = None) -> np.ndarray:
         n_samples = x.shape[0]
@@ -95,12 +110,10 @@ class CKA:
             y = y.reshape(y.shape[0], -1)
 
         if self.kernel == "linear":
-            k = self._linear_kernel(x)
-            l = self._linear_kernel(y)
-        else:
-            k = self._rbf_kernel(x)
-            l = self._rbf_kernel(y)
+            return linear_cka_doubly_centered_gram(x, y)
 
+        k = self._rbf_kernel(x)
+        l = self._rbf_kernel(y)
         k = self._center_gram(k)
         l = self._center_gram(l)
         hsic = np.sum(k * l)
@@ -217,6 +230,8 @@ def collect_model_activations(
     layers: Iterable[str] = DEFAULT_LAYER_NAMES,
     device: torch.device = torch.device("cpu"),
     max_batches: Optional[int] = 10,
+    max_activation_samples: Optional[int] = None,
+    activation_subsample_seed: int = 42,
 ) -> Dict[str, np.ndarray]:
     modules = dict(model.named_modules())
     missing = [layer_name for layer_name in layers if layer_name not in modules]
@@ -253,9 +268,19 @@ def collect_model_activations(
     for hook in hooks:
         hook.remove()
 
-    result = {}
-    for layer_name in layers:
+    layer_list = list(layers)
+    result: Dict[str, np.ndarray] = {}
+    for layer_name in layer_list:
         result[layer_name] = torch.cat(acts[layer_name], dim=0).to(torch.float32).numpy()
+
+    if max_activation_samples is not None and layer_list:
+        n = int(result[layer_list[0]].shape[0])
+        if n > max_activation_samples:
+            rng = np.random.RandomState(activation_subsample_seed)
+            idx = rng.choice(n, size=max_activation_samples, replace=False)
+            for layer_name in layer_list:
+                result[layer_name] = result[layer_name][idx]
+
     return result
 
 
@@ -264,14 +289,34 @@ def evaluate_pair_rows(
     acts_b: Dict[str, np.ndarray],
     layers: Iterable[str] = DEFAULT_LAYER_NAMES,
     metrics: Optional[Dict[str, object]] = None,
+    max_activation_samples: Optional[int] = None,
+    subsample_seed: int = 42,
+    *,
+    log_progress: bool = False,
+    log_prefix: str = "",
 ) -> List[dict]:
     metrics = metrics or build_default_metrics()
+    layer_list = list(layers)
+    idx: Optional[np.ndarray] = None
+    if max_activation_samples is not None and layer_list:
+        n = int(acts_a[layer_list[0]].shape[0])
+        if n > max_activation_samples:
+            rng = np.random.RandomState(subsample_seed)
+            idx = rng.choice(n, size=max_activation_samples, replace=False)
+
     rows = []
-    for layer in layers:
+    for layer in layer_list:
         x = acts_a[layer]
         y = acts_b[layer]
+        if x.shape[0] != y.shape[0]:
+            raise ValueError(f"Layer {layer}: mismatched sample counts {x.shape[0]} vs {y.shape[0]}")
+        if idx is not None:
+            x = x[idx]
+            y = y[idx]
         row = {"layer": layer, "n_samples": int(x.shape[0]), "n_features": int(x.shape[1])}
         for metric_name, metric in metrics.items():
+            if log_progress:
+                print(f"{log_prefix}layer={layer} metric={metric_name}", flush=True)
             row[metric_name] = float(metric.compute_similarity(x, y))
         rows.append(row)
     return rows

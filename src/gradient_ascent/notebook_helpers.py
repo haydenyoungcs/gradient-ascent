@@ -288,12 +288,18 @@ def run_notebook_trajectory_experiment(
             similarity_setup.layer_names,
             runtime.device,
             max_batches=trajectory_config.max_batches_for_similarity,
+            max_activation_samples=trajectory_config.max_activation_samples,
+            activation_subsample_seed=trajectory_config.activation_subsample_seed,
         ),
-        pair_evaluator=lambda acts_a, acts_b: evaluate_pair_rows(
+        pair_evaluator=lambda acts_a, acts_b, similarity_log_prefix=None: evaluate_pair_rows(
             acts_a,
             acts_b,
             layers=similarity_setup.layer_names,
             metrics=similarity_setup.metrics,
+            max_activation_samples=trajectory_config.max_activation_samples,
+            subsample_seed=trajectory_config.activation_subsample_seed,
+            log_progress=trajectory_config.log_similarity_progress and similarity_log_prefix is not None,
+            log_prefix=f"{similarity_log_prefix} " if similarity_log_prefix else "",
         ),
         transform_rows_for_plot=lambda rows: transform_rows_for_plot(
             rows, lower_better_metrics=similarity_setup.lower_better_metrics
@@ -413,6 +419,7 @@ def run_and_display_notebook_trajectory_pipeline(
             similarity_artifact = trajectory_artifacts.similarity_artifacts[algorithm_key][reference_key]
             display(IPyImage(filename=similarity_artifact.summary_plot_path))
             display(IPyImage(filename=similarity_artifact.evolving_bar_plot_path))
+            display(IPyImage(filename=similarity_artifact.grouped_evolving_bar_plot_path))
 
     return trajectory_artifacts, trajectory_wandb_run
 

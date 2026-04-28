@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import PillowWriter
@@ -35,8 +35,9 @@ def compute_epoch_rows_from_snapshots(
     model_factory: Callable[[], torch.nn.Module],
     reference_acts,
     activation_collector: Callable[[torch.nn.Module], Dict[str, np.ndarray]],
-    pair_evaluator: Callable[[Dict[str, np.ndarray], Dict[str, np.ndarray]], List[dict]],
+    pair_evaluator: Callable[[Dict[str, np.ndarray], Dict[str, np.ndarray], Optional[str]], List[dict]],
     map_location: torch.device | str,
+    similarity_log_prefix: Optional[str] = None,
 ) -> List[Tuple[int, List[dict]]]:
     epoch_rows = []
     for epoch_num, checkpoint_path in list_snapshot_paths(snapshot_dir):
@@ -44,8 +45,12 @@ def compute_epoch_rows_from_snapshots(
         model.load_state_dict(torch.load(checkpoint_path, map_location=map_location))
         model.eval()
 
+        if similarity_log_prefix:
+            print(f"{similarity_log_prefix} epoch={epoch_num} | collecting activations...", flush=True)
         acts_t = activation_collector(model)
-        rows = pair_evaluator(acts_t, reference_acts)
+        if similarity_log_prefix:
+            print(f"{similarity_log_prefix} epoch={epoch_num} | computing similarity scores...", flush=True)
+        rows = pair_evaluator(acts_t, reference_acts, similarity_log_prefix)
         epoch_rows.append((epoch_num, rows))
 
     return sorted(epoch_rows, key=lambda item: item[0])
@@ -91,6 +96,72 @@ def save_similarity_evolving_bar_plot(
             ax.set_xticks(x_positions)
             ax.set_xticklabels(metric_names, rotation=20, ha="right")
             ax.grid(axis="y", alpha=0.3)
+            writer.grab_frame()
+
+    plt.close(fig)
+    return out_path
+
+
+def save_similarity_evolving_grouped_bar_plot(
+    epoch_rows: EpochRows,
+    out_path: str,
+    algorithm_key: str,
+    reference_key: str,
+    layer_names: Iterable[str],
+    metric_names: Iterable[str],
+    lower_better_metrics: Iterable[str],
+) -> str:
+    metric_names = list(metric_names)
+    layer_names = list(layer_names)
+    oriented_rows = orient_epoch_rows_for_similarity(epoch_rows, metric_names, lower_better_metrics)
+    if not oriented_rows:
+        raise RuntimeError("Cannot create evolving grouped bar plot: epoch_rows is empty.")
+
+    layer_to_idx = {layer_name: idx for idx, layer_name in enumerate(layer_names)}
+    grouped_values_by_epoch: list[tuple[int, np.ndarray]] = []
+    for epoch_num, rows in oriented_rows:
+        matrix = np.zeros((len(layer_names), len(metric_names)), dtype=np.float64)
+        for row in rows:
+            layer = row["layer"]
+            if layer not in layer_to_idx:
+                continue
+            layer_idx = layer_to_idx[layer]
+            for metric_idx, metric_name in enumerate(metric_names):
+                matrix[layer_idx, metric_idx] = float(row[metric_name])
+        grouped_values_by_epoch.append((epoch_num, matrix))
+
+    x_positions = np.arange(len(metric_names), dtype=np.float64)
+    n_layers = max(len(layer_names), 1)
+    group_width = 0.8
+    bar_width = group_width / n_layers
+    color_map = plt.cm.get_cmap("tab10", n_layers)
+
+    fig, ax = plt.subplots(1, 1, figsize=(14, 6), constrained_layout=True)
+    writer = PillowWriter(fps=1)
+    with writer.saving(fig, out_path, dpi=160):
+        for epoch_num, matrix in grouped_values_by_epoch:
+            ax.clear()
+            for layer_idx, layer_name in enumerate(layer_names):
+                offsets = x_positions - (group_width / 2.0) + (layer_idx + 0.5) * bar_width
+                ax.bar(
+                    offsets,
+                    matrix[layer_idx],
+                    width=bar_width * 0.95,
+                    label=layer_name,
+                    color=color_map(layer_idx),
+                )
+
+            ax.set_title(
+                f"{algorithm_key.upper()} vs {reference_key.capitalize()} | "
+                f"Unlearning step {epoch_num} (grouped by metric, bars = layers)"
+            )
+            ax.set_xlabel("Similarity metric")
+            ax.set_ylabel("Similarity to reference")
+            ax.set_ylim(0.0, 1.02)
+            ax.set_xticks(x_positions)
+            ax.set_xticklabels(metric_names, rotation=20, ha="right")
+            ax.grid(axis="y", alpha=0.3)
+            ax.legend(title="Layer", ncol=2, fontsize="small")
             writer.grab_frame()
 
     plt.close(fig)

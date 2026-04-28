@@ -33,6 +33,7 @@ from .trajectories import (
     compute_epoch_rows_from_snapshots,
     save_combined_similarity_mia_plot,
     save_similarity_evolving_bar_plot,
+    save_similarity_evolving_grouped_bar_plot,
 )
 from .training import evaluate, train_model
 from .unlearning import (
@@ -111,6 +112,9 @@ class TrajectoryExperimentConfig:
     retain_control_label: int = 0
     trajectory_batch_size: int = 256
     max_batches_for_similarity: int = 8
+    max_activation_samples: Optional[int] = 1024
+    activation_subsample_seed: int = 42
+    log_similarity_progress: bool = True
     mia_seed: int = 1337
 
 
@@ -119,6 +123,7 @@ class SimilarityArtifact:
     csv_path: str
     summary_plot_path: str
     evolving_bar_plot_path: str
+    grouped_evolving_bar_plot_path: str
 
 
 @dataclass(frozen=True)
@@ -560,7 +565,7 @@ def run_trajectory_analysis(
     metric_names: Iterable[str],
     lower_better_metrics: Iterable[str],
     activation_collector: Callable[[torch.nn.Module, object], Dict[str, object]],
-    pair_evaluator: Callable[[Dict[str, object], Dict[str, object]], list[dict]],
+    pair_evaluator: Callable[[Dict[str, object], Dict[str, object], Optional[str]], list[dict]],
     transform_rows_for_plot: Callable[[list[dict]], list[dict]],
     wandb_run=None,
     wandb_module=None,
@@ -607,6 +612,11 @@ def run_trajectory_analysis(
         for reference_key, reference_acts in reference_map.items():
             ref_t0 = time.perf_counter()
             print(f"[Trajectory]   {algorithm_key.upper()} vs {reference_key.capitalize()} starting...")
+            similarity_log_prefix = (
+                f"[Similarity {algorithm_key.upper()} vs {reference_key.capitalize()}]"
+                if config.log_similarity_progress
+                else None
+            )
             epoch_rows = compute_epoch_rows_from_snapshots(
                 snapshot_dir,
                 model_factory,
@@ -614,6 +624,7 @@ def run_trajectory_analysis(
                 lambda model: activation_collector(model, testloader),
                 pair_evaluator,
                 device,
+                similarity_log_prefix=similarity_log_prefix,
             )
             csv_path = f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}.csv"
             summary_plot_path = (
@@ -621,6 +632,10 @@ def run_trajectory_analysis(
             )
             evolving_bar_plot_path = (
                 f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_evolving_bars.gif"
+            )
+            grouped_evolving_bar_plot_path = (
+                f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}"
+                "_evolving_grouped_bars.gif"
             )
 
             save_similarity_trajectory_csv(epoch_rows, csv_path, metric_names)
@@ -640,6 +655,15 @@ def run_trajectory_analysis(
                 metric_names,
                 lower_better_metrics,
             )
+            save_similarity_evolving_grouped_bar_plot(
+                epoch_rows,
+                grouped_evolving_bar_plot_path,
+                algorithm_key,
+                reference_key,
+                layer_names,
+                metric_names,
+                lower_better_metrics,
+            )
             _log_media(
                 wandb_run,
                 wandb_module,
@@ -652,10 +676,17 @@ def run_trajectory_analysis(
                 f"plots/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_evolving_bars",
                 evolving_bar_plot_path,
             )
+            _log_media(
+                wandb_run,
+                wandb_module,
+                f"plots/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_evolving_grouped_bars",
+                grouped_evolving_bar_plot_path,
+            )
             similarity_artifacts[algorithm_key][reference_key] = SimilarityArtifact(
                 csv_path=csv_path,
                 summary_plot_path=summary_plot_path,
                 evolving_bar_plot_path=evolving_bar_plot_path,
+                grouped_evolving_bar_plot_path=grouped_evolving_bar_plot_path,
             )
             print(
                 f"[Trajectory]   {algorithm_key.upper()} vs {reference_key.capitalize()} done "
