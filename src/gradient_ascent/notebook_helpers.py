@@ -32,6 +32,7 @@ from .experiments import (
 )
 from .models import Net
 from .similarity import (
+    CCA,
     DEFAULT_LAYER_NAMES,
     HIGHER_BETTER_METRICS,
     LOWER_BETTER_METRICS,
@@ -229,10 +230,17 @@ def run_notebook_core_experiment(
     return artifacts, wandb_run
 
 
-def prepare_similarity_setup() -> SimilaritySetup:
+def prepare_similarity_setup(
+    *,
+    cca_max_columns: Optional[int] = 512,
+    cca_column_subsample_seed: int = 43,
+) -> SimilaritySetup:
     """Return the notebook's default similarity-analysis configuration."""
     layer_names = list(DEFAULT_LAYER_NAMES)
-    metrics = build_default_metrics()
+    metrics = build_default_metrics(
+        cca_max_columns=cca_max_columns,
+        cca_column_subsample_seed=cca_column_subsample_seed,
+    )
     higher_better_metrics = list(HIGHER_BETTER_METRICS)
     lower_better_metrics = list(LOWER_BETTER_METRICS)
     plot_metric_names = higher_better_metrics + lower_better_metrics
@@ -254,6 +262,25 @@ def build_default_trajectory_config(runtime: NotebookRuntime) -> TrajectoryExper
     )
 
 
+def _similarity_setup_with_trajectory_cca(
+    setup: SimilaritySetup,
+    trajectory_config: TrajectoryExperimentConfig,
+) -> SimilaritySetup:
+    """Align the CCA object with trajectory speed settings (single knob in the notebook)."""
+    metrics = dict(setup.metrics)
+    metrics["cca"] = CCA(
+        max_columns=trajectory_config.cca_max_columns,
+        column_subsample_seed=trajectory_config.cca_column_subsample_seed,
+    )
+    return SimilaritySetup(
+        layer_names=setup.layer_names,
+        metrics=metrics,
+        higher_better_metrics=setup.higher_better_metrics,
+        lower_better_metrics=setup.lower_better_metrics,
+        plot_metric_names=setup.plot_metric_names,
+    )
+
+
 def run_notebook_trajectory_experiment(
     runtime: NotebookRuntime,
     core_artifacts: CoreExperimentArtifacts,
@@ -264,6 +291,7 @@ def run_notebook_trajectory_experiment(
 ) -> tuple[TrajectoryExperimentArtifacts, object]:
     """Run the notebook's full trajectory/MIA/similarity pipeline."""
     trajectory_config = build_default_trajectory_config(runtime)
+    similarity_setup = _similarity_setup_with_trajectory_cca(similarity_setup, trajectory_config)
     wandb_run = ensure_wandb_run(wandb_module, project=wandb_project, name=wandb_name)
     artifacts = run_trajectory_analysis(
         model_factory=runtime.model_factory,
@@ -291,15 +319,13 @@ def run_notebook_trajectory_experiment(
             max_activation_samples=trajectory_config.max_activation_samples,
             activation_subsample_seed=trajectory_config.activation_subsample_seed,
         ),
-        pair_evaluator=lambda acts_a, acts_b, similarity_log_prefix=None: evaluate_pair_rows(
+        pair_evaluator=lambda acts_a, acts_b, _similarity_log_prefix=None: evaluate_pair_rows(
             acts_a,
             acts_b,
             layers=similarity_setup.layer_names,
             metrics=similarity_setup.metrics,
             max_activation_samples=trajectory_config.max_activation_samples,
             subsample_seed=trajectory_config.activation_subsample_seed,
-            log_progress=trajectory_config.log_similarity_progress and similarity_log_prefix is not None,
-            log_prefix=f"{similarity_log_prefix} " if similarity_log_prefix else "",
         ),
         transform_rows_for_plot=lambda rows: transform_rows_for_plot(
             rows, lower_better_metrics=similarity_setup.lower_better_metrics

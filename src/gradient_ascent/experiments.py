@@ -115,6 +115,8 @@ class TrajectoryExperimentConfig:
     max_activation_samples: Optional[int] = 1024
     activation_subsample_seed: int = 42
     log_similarity_progress: bool = True
+    cca_max_columns: Optional[int] = 512
+    cca_column_subsample_seed: int = 43
     mia_seed: int = 1337
 
 

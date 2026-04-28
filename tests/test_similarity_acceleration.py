@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from gradient_ascent.similarity import CKA, evaluate_pair_rows, linear_cka_doubly_centered_gram
+from gradient_ascent.similarity import CCA, CKA, evaluate_pair_rows, linear_cka_doubly_centered_gram
 
 
 def _legacy_linear_cka_via_centered_gram(x: np.ndarray, y: np.ndarray) -> float:
@@ -28,6 +28,17 @@ class LinearCkaEquivalenceTest(unittest.TestCase):
             got = linear_cka_doubly_centered_gram(x, y)
             self.assertAlmostEqual(got, want, places=5)
             self.assertAlmostEqual(CKA(kernel="linear").compute_similarity(x, y), want, places=5)
+
+
+class CcaSmokeTest(unittest.TestCase):
+    def test_cca_runs_with_column_cap(self) -> None:
+        rng = np.random.RandomState(3)
+        n, d = 64, 400
+        x = rng.randn(n, d).astype(np.float32)
+        y = rng.randn(n, d).astype(np.float32)
+        s = CCA(max_columns=80, column_subsample_seed=0).compute_similarity(x, y)
+        self.assertGreaterEqual(float(s), 0.0)
+        self.assertLessEqual(float(s), 1.0)
 
 
 class EvaluatePairRowsSubsampleTest(unittest.TestCase):

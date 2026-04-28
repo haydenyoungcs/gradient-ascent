@@ -6,14 +6,40 @@ from typing import Dict, Iterable, List, Optional, Union
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from scipy.linalg import svd
 
 from .models import DEFAULT_LAYER_NAMES
 
 
+def _cca_subsample_columns(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_columns: Optional[int],
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce feature dimension before QR when d is large (same idea as SVCCA-style subsampling)."""
+    if max_columns is None:
+        return x, y
+    rng_x = np.random.RandomState(seed)
+    rng_y = np.random.RandomState(seed + 7919)
+    if x.shape[1] > max_columns:
+        idx = rng_x.choice(x.shape[1], size=max_columns, replace=False)
+        x = x[:, idx]
+    if y.shape[1] > max_columns:
+        idx = rng_y.choice(y.shape[1], size=max_columns, replace=False)
+        y = y[:, idx]
+    return x, y
+
+
 class CCA:
-    def __init__(self, epsilon: float = 1e-8):
+    def __init__(
+        self,
+        epsilon: float = 1e-8,
+        max_columns: Optional[int] = None,
+        column_subsample_seed: int = 43,
+    ):
         self.epsilon = epsilon
+        self.max_columns = max_columns
+        self.column_subsample_seed = column_subsample_seed
 
     def _center_data(self, x: np.ndarray) -> np.ndarray:
         return x - x.mean(axis=0, keepdims=True)
@@ -34,18 +60,25 @@ class CCA:
         if y.ndim > 2:
             y = y.reshape(y.shape[0], -1)
 
+        x = np.ascontiguousarray(x, dtype=np.float32)
+        y = np.ascontiguousarray(y, dtype=np.float32)
+
+        slice_cap = min(x.shape[1], y.shape[1])
+        x, y = _cca_subsample_columns(x, y, self.max_columns, self.column_subsample_seed)
+
         x = self._center_data(x)
         y = self._center_data(y)
-        qx, _ = np.linalg.qr(x)
-        qy, _ = np.linalg.qr(y)
+        qx, _ = np.linalg.qr(x, mode="reduced")
+        qy, _ = np.linalg.qr(y, mode="reduced")
 
         try:
-            _, correlations, _ = svd(qx.T @ qy)
+            # Singular values only: avoids O(min^3) work to build full U,V (LAPACK path).
+            correlations = np.linalg.svd(qx.T @ qy, compute_uv=False)
             correlations = np.clip(correlations, 0, 1)
-            correlations = correlations[: min(x.shape[1], y.shape[1])]
-            mean_correlation = float(np.mean(correlations))
+            correlations = correlations[:slice_cap]
+            mean_correlation = float(np.mean(correlations)) if correlations.size > 0 else 0.0
         except np.linalg.LinAlgError:
-            correlations = np.zeros(min(x.shape[1], y.shape[1]))
+            correlations = np.zeros(slice_cap)
             mean_correlation = 0.0
 
         if return_correlations:
@@ -204,10 +237,14 @@ class KLDivergence:
         return self._kl_divergence(p, q)
 
 
-def build_default_metrics() -> Dict[str, object]:
+def build_default_metrics(
+    *,
+    cca_max_columns: Optional[int] = 512,
+    cca_column_subsample_seed: int = 43,
+) -> Dict[str, object]:
     return {
         "cka_linear": CKA(kernel="linear"),
-        "cca": CCA(),
+        "cca": CCA(max_columns=cca_max_columns, column_subsample_seed=cca_column_subsample_seed),
         "cosine": CosineSimilarity(),
         "euclidean": EuclideanDistance(),
         "kl_sym": KLDivergence(symmetric=True),
@@ -291,9 +328,6 @@ def evaluate_pair_rows(
     metrics: Optional[Dict[str, object]] = None,
     max_activation_samples: Optional[int] = None,
     subsample_seed: int = 42,
-    *,
-    log_progress: bool = False,
-    log_prefix: str = "",
 ) -> List[dict]:
     metrics = metrics or build_default_metrics()
     layer_list = list(layers)
@@ -315,8 +349,6 @@ def evaluate_pair_rows(
             y = y[idx]
         row = {"layer": layer, "n_samples": int(x.shape[0]), "n_features": int(x.shape[1])}
         for metric_name, metric in metrics.items():
-            if log_progress:
-                print(f"{log_prefix}layer={layer} metric={metric_name}", flush=True)
             row[metric_name] = float(metric.compute_similarity(x, y))
         rows.append(row)
     return rows

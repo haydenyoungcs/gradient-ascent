@@ -18,6 +18,12 @@ This note records why two changes were made to the trajectory similarity stage a
 
 **Trade-off.** Scores are Monte Carlo estimates over a fixed random subset of inputs rather than the full collected batch stack. For thesis text, state the cap and seed; set `max_activation_samples=None` on `TrajectoryExperimentConfig` (or pass `None` through `collect_model_activations` / `evaluate_pair_rows`) to use every collected row at higher cost.
 
-## 3. Notebook / cell progress lines
+## 3. CCA cost reductions
 
-During the trajectory similarity stage, `TrajectoryExperimentConfig.log_similarity_progress` (default `True`) prints one line per unlearning snapshot when activations are collected and when metric rows begin, then one line per `(layer, metric)` pair inside `evaluate_pair_rows`. Set `log_similarity_progress=False` for quiet runs.
+**SVD without U and V.** The CCA path only needs singular values of `qx.T @ qy`. Calling `numpy.linalg.svd(..., compute_uv=False)` skips the expensive construction of the full orthogonal factors while returning the same singular values (up to floating-point noise).
+
+**Optional column subsampling.** QR on an `n × d` activation matrix is costly when `d` is large (e.g. ResNet block channels). Before centering, we can randomly subsample columns (neurons) to a cap (`cca_max_columns`, default `512` in `TrajectoryExperimentConfig` / `prepare_similarity_setup`). This is a Monte Carlo estimate over features, analogous in spirit to dimensionality reduction used in SVCCA (Raghu et al., 2017, *SVCCA: Singular Vector Canonical Correlation Analysis for deep learning dynamics and interpretability*). Set `cca_max_columns=None` for the previous full-width CCA (slowest, closest to the exact wide-matrix pipeline).
+
+## 4. Notebook / cell progress lines
+
+During the trajectory similarity stage, `TrajectoryExperimentConfig.log_similarity_progress` (default `True`) prints two lines per unlearning snapshot epoch: when activations are collected and when similarity scoring starts (`compute_epoch_rows_from_snapshots` in `trajectories.py`). Per-layer / per-metric lines are not printed. Set `log_similarity_progress=False` to disable these epoch lines as well.
