@@ -3,13 +3,21 @@ from __future__ import annotations
 import os
 import time
 import csv
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
 
-from .data import CIFAR10_CLASSES, make_forget_retain_subsets, make_loader, sample_balanced_class_subsets, subset_for_class
+from .data import (
+    CIFAR10_CLASSES,
+    clone_dataset_with_eval_transform,
+    make_forget_retain_subsets,
+    make_loader,
+    sample_class_subsets,
+    subset_for_class,
+)
 from .mia import compute_mia_baseline, compute_mia_trajectory_rows
 from .reporting import (
     load_mean_series,
@@ -32,6 +40,7 @@ from .reporting import (
 from .trajectories import (
     compute_epoch_rows_from_snapshots_multi_reference,
     save_combined_similarity_mia_plot,
+    save_similarity_metric_timing_plot,
     save_similarity_evolving_bar_plot,
     save_similarity_evolving_grouped_bar_plot,
 )
@@ -120,6 +129,10 @@ class TrajectoryExperimentConfig:
     cca_max_columns: Optional[int] = 512
     cca_column_subsample_seed: int = 43
     mia_seed: int = 1337
+    mia_fixed_cv_across_epochs: bool = True
+    mia_include_mlp_attacker: bool = True
+    mia_balance_probe_classes: bool = False
+    mia_bootstrap_rounds: int = 200
 
 
 @dataclass(frozen=True)
@@ -140,6 +153,7 @@ class MIAArtifact:
 @dataclass(frozen=True)
 class TrajectoryExperimentArtifacts:
     similarity_artifacts: Dict[str, Dict[str, SimilarityArtifact]]
+    similarity_metric_timing_plot_paths: Dict[str, str]
     mia_artifacts: Dict[str, MIAArtifact]
     mia_baseline_csv_path: str
     timing_csv_path: str
@@ -156,7 +170,7 @@ class CombinedComparisonConfig:
     mia_panels: Sequence[tuple[str, str]] = (
         ("forget_loss_auc", "Forget loss AUC (lower = less inferable)"),
         ("forget_logreg_auc", "Forget logreg AUC (lower = less inferable)"),
-        ("forget_logreg_tpr_at_1pct", "Forget logreg TPR@1%FPR (lower = less inferable)"),
+        ("forget_logreg_advantage", "Forget logreg advantage (lower = less inferable)"),
         ("forget_logreg_mean_member_prob", "Forget logreg mean member prob (lower = less inferable)"),
     )
 
@@ -195,7 +209,6 @@ def _save_classwise_artifacts(
 
     save_classwise_history_csv(epochs, history_tensor, CIFAR10_CLASSES, csv_path)
     save_classwise_percent_change_plot(
-        epochs,
         history_tensor,
         CIFAR10_CLASSES,
         percent_plot_path,
@@ -571,8 +584,7 @@ def run_trajectory_analysis(
     metric_names: Iterable[str],
     lower_better_metrics: Iterable[str],
     activation_collector: Callable[[torch.nn.Module, object], Dict[str, object]],
-    pair_evaluator: Callable[[Dict[str, object], Dict[str, object], Optional[str]], list[dict]],
-    transform_rows_for_plot: Callable[[list[dict]], list[dict]],
+    pair_evaluator: Callable[[Dict[str, object], Dict[str, object], Optional[str], Optional[Dict[str, float]]], list[dict]],
     reference_activation_preparer: Optional[Callable[[Dict[str, object]], Dict[str, object]]] = None,
     snapshot_activation_preparer: Optional[Callable[[Dict[str, object]], Dict[str, object]]] = None,
     wandb_run=None,
@@ -628,6 +640,7 @@ def run_trajectory_analysis(
         stage_timing_seconds["prepare_reference_activations"] = time.perf_counter() - prep_t0
 
     similarity_artifacts: Dict[str, Dict[str, SimilarityArtifact]] = {}
+    similarity_metric_timing_plot_paths: Dict[str, str] = {}
     metric_names = list(metric_names)
     lower_better_metrics = list(lower_better_metrics)
     for algorithm_key, snapshot_dir in snapshot_dirs.items():
@@ -642,6 +655,8 @@ def run_trajectory_analysis(
             )
             for reference_key in reference_map
         }
+        metric_timing_seconds_algo: Dict[str, float] = defaultdict(float)
+        scoring_t0 = time.perf_counter()
         epoch_rows_map = compute_epoch_rows_from_snapshots_multi_reference(
             snapshot_dir,
             model_factory,
@@ -656,8 +671,16 @@ def run_trajectory_analysis(
                 else None
             ),
             activation_preparer=snapshot_activation_preparer or reference_activation_preparer,
+            metric_timing_seconds=metric_timing_seconds_algo,
+        )
+        scoring_elapsed = time.perf_counter() - scoring_t0
+        stage_timing_seconds[f"similarity_{algorithm_key}_epoch_scoring"] = scoring_elapsed
+        print(
+            f"[Trajectory] Similarity epoch scoring for {algorithm_key.upper()} done "
+            f"in {scoring_elapsed:.1f}s"
         )
 
+        artifact_total_elapsed = 0.0
         for reference_key in reference_map:
             ref_t0 = time.perf_counter()
             print(f"[Trajectory]   {algorithm_key.upper()} vs {reference_key.capitalize()} starting...")
@@ -724,30 +747,57 @@ def run_trajectory_analysis(
                 evolving_bar_plot_path=evolving_bar_plot_path,
                 grouped_evolving_bar_plot_path=grouped_evolving_bar_plot_path,
             )
+            ref_elapsed = time.perf_counter() - ref_t0
             print(
                 f"[Trajectory]   {algorithm_key.upper()} vs {reference_key.capitalize()} done "
-                f"in {time.perf_counter() - ref_t0:.1f}s"
+                f"in {ref_elapsed:.1f}s"
             )
-            stage_timing_seconds[f"similarity_{algorithm_key}_vs_{reference_key}"] = time.perf_counter() - ref_t0
+            stage_timing_seconds[f"similarity_{algorithm_key}_vs_{reference_key}"] = ref_elapsed
+            stage_timing_seconds[f"similarity_{algorithm_key}_vs_{reference_key}_artifact_io"] = ref_elapsed
+            artifact_total_elapsed += ref_elapsed
+        stage_timing_seconds[f"similarity_{algorithm_key}_artifact_io_total"] = artifact_total_elapsed
+        for metric_name, seconds in metric_timing_seconds_algo.items():
+            stage_timing_seconds[f"similarity_{algorithm_key}_metric_{metric_name}_seconds"] = float(seconds)
+        metric_timing_plot_path = (
+            f"{config.out_dir}/similarity_metric_timing_{algorithm_key}.png"
+        )
+        save_similarity_metric_timing_plot(
+            metric_timing_seconds_algo,
+            metric_timing_plot_path,
+            algorithm_key,
+        )
+        similarity_metric_timing_plot_paths[algorithm_key] = metric_timing_plot_path
+        _log_media(
+            wandb_run,
+            wandb_module,
+            f"plots/similarity_metric_timing_{algorithm_key}",
+            metric_timing_plot_path,
+        )
         stage_timing_seconds[f"similarity_{algorithm_key}_total"] = time.perf_counter() - algo_t0
         print(
             f"[Trajectory] Similarity stage for {algorithm_key.upper()} finished "
-            f"in {stage_timing_seconds[f'similarity_{algorithm_key}_total']:.1f}s"
+            f"in {stage_timing_seconds[f'similarity_{algorithm_key}_total']:.1f}s "
+            f"(epoch scoring {scoring_elapsed:.1f}s + artifact I/O {artifact_total_elapsed:.1f}s)"
         )
 
     t0 = time.perf_counter()
     forget_subset, _retain_subset = make_forget_retain_subsets(trainset, config.target_label)
-    forget_member_subset, forget_nonmember_subset, forget_n = sample_balanced_class_subsets(
-        trainset,
+    # MIA should probe fixed member/non-member distributions. Use an eval-view of
+    # the train dataset so member examples are not randomly augmented each pass.
+    mia_trainset = clone_dataset_with_eval_transform(trainset)
+    forget_member_subset, forget_nonmember_subset, forget_n_member, forget_n_nonmember = sample_class_subsets(
+        mia_trainset,
         testset,
         config.target_label,
         config.mia_seed,
+        balance_classes=config.mia_balance_probe_classes,
     )
-    retain_member_subset, retain_nonmember_subset, retain_n = sample_balanced_class_subsets(
-        trainset,
+    retain_member_subset, retain_nonmember_subset, retain_n_member, retain_n_nonmember = sample_class_subsets(
+        mia_trainset,
         testset,
         config.retain_control_label,
         config.mia_seed + 100,
+        balance_classes=config.mia_balance_probe_classes,
     )
     del forget_subset
 
@@ -768,8 +818,9 @@ def run_trajectory_analysis(
         use_cuda,
     )
     print(
-        f"MIA probes ready | forget(frog={config.target_label}): {forget_n} member + {forget_n} non-member | "
-        f"retain(label={config.retain_control_label}): {retain_n} member + {retain_n} non-member"
+        f"MIA probes ready | balanced={config.mia_balance_probe_classes} | "
+        f"forget(frog={config.target_label}): {forget_n_member} member + {forget_n_nonmember} non-member | "
+        f"retain(label={config.retain_control_label}): {retain_n_member} member + {retain_n_nonmember} non-member"
     )
     stage_timing_seconds["prepare_mia_subsets_and_loaders"] = time.perf_counter() - t0
     print(
@@ -789,6 +840,8 @@ def run_trajectory_analysis(
         retain_nonmember_loader,
         device,
         seed=config.mia_seed,
+        include_mlp_attacker=config.mia_include_mlp_attacker,
+        bootstrap_rounds=config.mia_bootstrap_rounds,
     )
     mia_baseline_csv_path = save_mia_baseline_csv(mia_baseline, f"{config.out_dir}/mia_retrained_baseline.csv")
 
@@ -810,7 +863,7 @@ def run_trajectory_analysis(
     mia_panel_metrics = [
         ("forget_loss_auc", "Loss-threshold AUC (lower = less inferable)"),
         ("forget_logreg_auc", "LogReg AUC (lower = less inferable)"),
-        ("forget_logreg_tpr_at_1pct", "LogReg TPR @ 1% FPR (lower = less inferable)"),
+        ("forget_logreg_advantage", "LogReg advantage (lower = less inferable)"),
         ("forget_logreg_mean_member_prob", "LogReg mean member prob (lower = less inferable)"),
     ]
 
@@ -828,6 +881,9 @@ def run_trajectory_analysis(
             device,
             seed_base=config.mia_seed,
             map_location=device,
+            fixed_cv_across_epochs=config.mia_fixed_cv_across_epochs,
+            include_mlp_attacker=config.mia_include_mlp_attacker,
+            bootstrap_rounds=config.mia_bootstrap_rounds,
         )
         csv_path = save_mia_trajectory_csv(rows, f"{config.out_dir}/mia_vs_unlearning_epoch_{algorithm_key}.csv")
         grid_plot_path = save_mia_metric_grid_plot(
@@ -881,6 +937,7 @@ def run_trajectory_analysis(
     print(f"[Trajectory] Saved timing CSV to {timing_csv_path}")
     return TrajectoryExperimentArtifacts(
         similarity_artifacts=similarity_artifacts,
+        similarity_metric_timing_plot_paths=similarity_metric_timing_plot_paths,
         mia_artifacts=mia_artifacts,
         mia_baseline_csv_path=mia_baseline_csv_path,
         timing_csv_path=timing_csv_path,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import PillowWriter
@@ -50,42 +50,17 @@ def list_snapshot_paths(snapshot_dir: str) -> List[Tuple[int, str]]:
     ]
 
 
-def compute_epoch_rows_from_snapshots(
-    snapshot_dir: str,
-    model_factory: Callable[[], torch.nn.Module],
-    reference_acts,
-    activation_collector: Callable[[torch.nn.Module], Dict[str, np.ndarray]],
-    pair_evaluator: Callable[[Dict[str, np.ndarray], Dict[str, np.ndarray], Optional[str]], List[dict]],
-    map_location: torch.device | str,
-    similarity_log_prefix: Optional[str] = None,
-) -> List[Tuple[int, List[dict]]]:
-    epoch_rows = []
-    for epoch_num, checkpoint_path in list_snapshot_paths(snapshot_dir):
-        model = model_factory()
-        model.load_state_dict(torch.load(checkpoint_path, map_location=map_location))
-        model.eval()
-
-        if similarity_log_prefix:
-            print(f"{similarity_log_prefix} epoch={epoch_num} | collecting activations...", flush=True)
-        acts_t = activation_collector(model)
-        if similarity_log_prefix:
-            print(f"{similarity_log_prefix} epoch={epoch_num} | computing similarity scores...", flush=True)
-        rows = pair_evaluator(acts_t, reference_acts, similarity_log_prefix)
-        epoch_rows.append((epoch_num, rows))
-
-    return sorted(epoch_rows, key=lambda item: item[0])
-
-
 def compute_epoch_rows_from_snapshots_multi_reference(
     snapshot_dir: str,
     model_factory: Callable[[], torch.nn.Module],
     reference_acts_map: Dict[str, Dict[str, object]],
     activation_collector: Callable[[torch.nn.Module], Dict[str, np.ndarray]],
-    pair_evaluator: Callable[[Dict[str, object], Dict[str, object], Optional[str]], List[dict]],
+    pair_evaluator: Callable[[Dict[str, object], Dict[str, object], Optional[str], Optional[Dict[str, float]]], List[dict]],
     map_location: torch.device | str,
     similarity_log_prefix_map: Optional[Dict[str, Optional[str]]] = None,
     activation_cache_dir: Optional[str] = None,
     activation_preparer: Optional[Callable[[Dict[str, np.ndarray]], Dict[str, object]]] = None,
+    metric_timing_seconds: Optional[Dict[str, float]] = None,
 ) -> Dict[str, List[Tuple[int, List[dict]]]]:
     """Compute snapshot activations once, then score against multiple references."""
     rows_by_reference: Dict[str, List[Tuple[int, List[dict]]]] = {key: [] for key in reference_acts_map}
@@ -122,12 +97,40 @@ def compute_epoch_rows_from_snapshots_multi_reference(
                     f"{similarity_log_prefix} epoch={epoch_num} | computing similarity scores...",
                     flush=True,
                 )
-            rows = pair_evaluator(acts_for_evaluation, reference_acts, similarity_log_prefix)
+            rows = pair_evaluator(acts_for_evaluation, reference_acts, similarity_log_prefix, metric_timing_seconds)
             rows_by_reference[reference_key].append((epoch_num, rows))
 
     for reference_key in rows_by_reference:
         rows_by_reference[reference_key] = sorted(rows_by_reference[reference_key], key=lambda item: item[0])
     return rows_by_reference
+
+
+def save_similarity_metric_timing_plot(
+    metric_timing_seconds: Mapping[str, float],
+    out_path: str,
+    algorithm_key: str,
+) -> str:
+    if not metric_timing_seconds:
+        raise RuntimeError("Cannot create metric timing plot: metric_timing_seconds is empty.")
+
+    metric_names = list(metric_timing_seconds.keys())
+    values = np.array([float(metric_timing_seconds[name]) for name in metric_names], dtype=np.float64)
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4.5), constrained_layout=True)
+    y_positions = np.arange(len(metric_names))
+    ax.barh(y_positions, values, color="#4c72b0")
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(metric_names)
+    ax.set_xlabel("Total compute time (s)")
+    ax.set_title(f"{algorithm_key.upper()} similarity metric compute time totals")
+    ax.grid(axis="x", alpha=0.3)
+
+    for idx, value in enumerate(values):
+        ax.text(float(value) + max(values) * 0.01 if float(max(values)) > 0 else 0.01, idx, f"{value:.2f}s", va="center")
+
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    return out_path
 
 
 def save_similarity_evolving_bar_plot(

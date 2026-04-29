@@ -31,6 +31,7 @@ from .experiments import (
     save_combined_trajectory_comparison,
 )
 from .models import Net
+from .reporting import orient_epoch_rows_for_similarity
 from .similarity import (
     CCA,
     DEFAULT_LAYER_NAMES,
@@ -40,7 +41,6 @@ from .similarity import (
     collect_model_activations,
     evaluate_pair_rows_prepared,
     prepare_activations_for_evaluation,
-    transform_rows_for_plot,
 )
 from .training import build_amp_config, configure_runtime
 from .unlearning import GAConfig, SCRUBConfig, SSDConfig
@@ -70,6 +70,126 @@ class SimilaritySetup:
     higher_better_metrics: list[str]
     lower_better_metrics: list[str]
     plot_metric_names: list[str]
+
+
+def _load_similarity_epoch_rows_from_csv(csv_path: str) -> list[tuple[int, list[dict]]]:
+    with open(csv_path, "r", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+    if not rows:
+        return []
+    by_epoch: dict[int, list[dict]] = {}
+    for row in rows:
+        epoch = int(row["epoch"])
+        row_dict = {
+            "layer": row["layer"],
+            "n_samples": int(row["n_samples"]),
+            "n_features": int(row["n_features"]),
+        }
+        for key, value in row.items():
+            if key in {"epoch", "layer", "n_samples", "n_features"}:
+                continue
+            row_dict[key] = float(value)
+        by_epoch.setdefault(epoch, []).append(row_dict)
+    return sorted(by_epoch.items(), key=lambda item: item[0])
+
+
+def display_similarity_epoch_slider(
+    csv_path: str,
+    algorithm_key: str,
+    reference_key: str,
+    layer_names: list[str],
+    metric_names: list[str],
+    lower_better_metrics: list[str],
+) -> None:
+    """Display an interactive slider to scrub similarity epochs in-notebook."""
+    from IPython.display import clear_output, display
+    import ipywidgets as widgets
+
+    epoch_rows = _load_similarity_epoch_rows_from_csv(csv_path)
+    oriented_rows = orient_epoch_rows_for_similarity(epoch_rows, metric_names, lower_better_metrics)
+    if not oriented_rows:
+        print(f"No similarity rows available for {algorithm_key} vs {reference_key}.")
+        return
+
+    epoch_options = [int(epoch) for epoch, _ in oriented_rows]
+    mode = widgets.ToggleButtons(
+        options=[("Mean across layers", "mean"), ("Grouped by layer", "grouped")],
+        description="View:",
+    )
+    slider = widgets.SelectionSlider(
+        options=epoch_options,
+        value=epoch_options[0],
+        description="Epoch:",
+        continuous_update=False,
+    )
+    out = widgets.Output()
+
+    layer_to_idx = {layer: idx for idx, layer in enumerate(layer_names)}
+
+    def _render(*_args):
+        epoch = int(slider.value)
+        rows_for_epoch = next(rows for ep, rows in oriented_rows if int(ep) == epoch)
+        with out:
+            clear_output(wait=True)
+            if mode.value == "mean":
+                fig, ax = plt.subplots(1, 1, figsize=(10, 4.5), constrained_layout=True)
+                values = []
+                for metric_name in metric_names:
+                    vals = np.array([float(row[metric_name]) for row in rows_for_epoch], dtype=np.float64)
+                    values.append(float(np.mean(vals)))
+                x_positions = np.arange(len(metric_names))
+                ax.bar(x_positions, values, color="#4c72b0")
+                ax.set_xticks(x_positions)
+                ax.set_xticklabels(metric_names, rotation=20, ha="right")
+                ax.set_ylim(0.0, 1.02)
+                ax.set_ylabel("Similarity to reference")
+                ax.set_title(
+                    f"{algorithm_key.upper()} vs {reference_key.capitalize()} | "
+                    f"step {epoch} (mean across layers)"
+                )
+                ax.grid(axis="y", alpha=0.3)
+            else:
+                fig, ax = plt.subplots(1, 1, figsize=(12, 5), constrained_layout=True)
+                matrix = np.zeros((len(layer_names), len(metric_names)), dtype=np.float64)
+                for row in rows_for_epoch:
+                    layer = row["layer"]
+                    if layer not in layer_to_idx:
+                        continue
+                    layer_idx = layer_to_idx[layer]
+                    for metric_idx, metric_name in enumerate(metric_names):
+                        matrix[layer_idx, metric_idx] = float(row[metric_name])
+                x_positions = np.arange(len(metric_names), dtype=np.float64)
+                n_layers = max(len(layer_names), 1)
+                group_width = 0.8
+                bar_width = group_width / n_layers
+                color_map = plt.cm.get_cmap("tab10", n_layers)
+                for layer_idx, layer_name in enumerate(layer_names):
+                    offsets = x_positions - (group_width / 2.0) + (layer_idx + 0.5) * bar_width
+                    ax.bar(
+                        offsets,
+                        matrix[layer_idx],
+                        width=bar_width * 0.95,
+                        label=layer_name,
+                        color=color_map(layer_idx),
+                    )
+                ax.set_xticks(x_positions)
+                ax.set_xticklabels(metric_names, rotation=20, ha="right")
+                ax.set_ylim(0.0, 1.02)
+                ax.set_ylabel("Similarity to reference")
+                ax.set_title(
+                    f"{algorithm_key.upper()} vs {reference_key.capitalize()} | "
+                    f"step {epoch} (grouped by metric, bars = layers)"
+                )
+                ax.grid(axis="y", alpha=0.3)
+                ax.legend(title="Layer", ncol=2, fontsize="small")
+            display(fig)
+            plt.close(fig)
+
+    mode.observe(_render, names="value")
+    slider.observe(_render, names="value")
+    _render()
+    display(widgets.VBox([widgets.HBox([mode, slider]), out]))
 
 
 def build_default_core_config(
@@ -336,14 +456,12 @@ def run_notebook_trajectory_experiment(
             subsample_seed=trajectory_config.activation_subsample_seed,
             precompute_metric_reference_cache=False,
         ),
-        pair_evaluator=lambda prepared_acts_a, prepared_reference_acts, _similarity_log_prefix=None: evaluate_pair_rows_prepared(
+        pair_evaluator=lambda prepared_acts_a, prepared_reference_acts, _similarity_log_prefix=None, metric_timing_seconds=None: evaluate_pair_rows_prepared(
             prepared_acts_a,
             prepared_reference_acts,
             layers=similarity_setup.layer_names,
             metrics=similarity_setup.metrics,
-        ),
-        transform_rows_for_plot=lambda rows: transform_rows_for_plot(
-            rows, lower_better_metrics=similarity_setup.lower_better_metrics
+            metric_timing_seconds=metric_timing_seconds,
         ),
         wandb_run=wandb_run,
         wandb_module=wandb_module,
@@ -443,7 +561,8 @@ def run_and_display_notebook_trajectory_pipeline(
     wandb_module=None,
 ):
     """Run trajectory/MIA/similarity analysis and display all generated figures."""
-    from IPython.display import Image as IPyImage, display
+    from IPython.display import Image as IPyImage, clear_output, display
+    import ipywidgets as widgets
 
     trajectory_artifacts, trajectory_wandb_run = run_notebook_trajectory_experiment(
         runtime,
@@ -456,11 +575,35 @@ def run_and_display_notebook_trajectory_pipeline(
         mia_artifact = trajectory_artifacts.mia_artifacts[algorithm_key]
         display(IPyImage(filename=mia_artifact.grid_plot_path))
         display(IPyImage(filename=mia_artifact.control_plot_path))
+        display(IPyImage(filename=trajectory_artifacts.similarity_metric_timing_plot_paths[algorithm_key]))
         for reference_key in ["retrained", "original"]:
             similarity_artifact = trajectory_artifacts.similarity_artifacts[algorithm_key][reference_key]
-            display(IPyImage(filename=similarity_artifact.summary_plot_path))
-            display(IPyImage(filename=similarity_artifact.evolving_bar_plot_path))
-            display(IPyImage(filename=similarity_artifact.grouped_evolving_bar_plot_path))
+            hide_gifs_checkbox = widgets.Checkbox(
+                value=False,
+                description=f"Hide GIFs ({algorithm_key.upper()} vs {reference_key})",
+                indent=False,
+            )
+            gif_out = widgets.Output()
+
+            def _render_gifs(*_args):
+                with gif_out:
+                    clear_output(wait=True)
+                    display(IPyImage(filename=similarity_artifact.summary_plot_path))
+                    if not bool(hide_gifs_checkbox.value):
+                        display(IPyImage(filename=similarity_artifact.evolving_bar_plot_path))
+                        display(IPyImage(filename=similarity_artifact.grouped_evolving_bar_plot_path))
+
+            hide_gifs_checkbox.observe(_render_gifs, names="value")
+            _render_gifs()
+            display(widgets.VBox([hide_gifs_checkbox, gif_out]))
+            display_similarity_epoch_slider(
+                similarity_artifact.csv_path,
+                algorithm_key=algorithm_key,
+                reference_key=reference_key,
+                layer_names=similarity_setup.layer_names,
+                metric_names=similarity_setup.plot_metric_names,
+                lower_better_metrics=similarity_setup.lower_better_metrics,
+            )
 
     print(f"Saved trajectory timing CSV to {trajectory_artifacts.timing_csv_path}")
     return trajectory_artifacts, trajectory_wandb_run

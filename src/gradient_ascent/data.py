@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import copy
 import os
 from typing import Tuple
 
 import numpy as np
-import torch
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Dataset, Subset
@@ -58,6 +58,25 @@ def load_cifar10_datasets(root: str = "./data") -> Tuple[Dataset, Dataset]:
     return trainset, testset
 
 
+def clone_dataset_with_eval_transform(dataset: Dataset) -> Dataset:
+    """Return a shallow dataset clone that uses deterministic eval transforms.
+
+    This is used by MIA probes so member examples are evaluated without random
+    train-time augmentation (crop/flip), making member/non-member comparisons
+    more stable and easier to interpret.
+    """
+    if isinstance(dataset, Subset):
+        cloned_parent = clone_dataset_with_eval_transform(dataset.dataset)
+        return Subset(cloned_parent, list(dataset.indices))
+
+    if not hasattr(dataset, "transform"):
+        raise TypeError("Dataset must expose a 'transform' attribute to clone eval view.")
+
+    cloned = copy.copy(dataset)
+    cloned.transform = cifar10_transform(train=False)
+    return cloned
+
+
 def default_num_workers(use_cuda: bool) -> int:
     return min(12, os.cpu_count() or 2) if use_cuda else 2
 
@@ -99,12 +118,13 @@ def make_forget_retain_subsets(dataset: Dataset, target_label: int) -> Tuple[Sub
     return forget_subset, retain_subset
 
 
-def sample_balanced_class_subsets(
+def sample_class_subsets(
     train_dataset: Dataset,
     test_dataset: Dataset,
     class_label: int,
     seed: int,
-) -> Tuple[Subset, Subset, int]:
+    balance_classes: bool = True,
+) -> Tuple[Subset, Subset, int, int]:
     train_targets = getattr(train_dataset, "targets", None)
     test_targets = getattr(test_dataset, "targets", None)
     if train_targets is None or test_targets is None:
@@ -112,13 +132,40 @@ def sample_balanced_class_subsets(
 
     train_idx = [i for i, lbl in enumerate(train_targets) if int(lbl) == int(class_label)]
     test_idx = [i for i, lbl in enumerate(test_targets) if int(lbl) == int(class_label)]
-    n = min(len(train_idx), len(test_idx))
-    if n < 2:
+    if len(train_idx) < 2 or len(test_idx) < 2:
         raise RuntimeError(
             f"Not enough samples for class {class_label}: train={len(train_idx)}, test={len(test_idx)}"
         )
 
     rng = np.random.default_rng(int(seed) + int(class_label))
-    train_sel = sorted(rng.choice(train_idx, size=n, replace=False).tolist())
-    test_sel = sorted(rng.choice(test_idx, size=n, replace=False).tolist())
-    return Subset(train_dataset, train_sel), Subset(test_dataset, test_sel), n
+    if balance_classes:
+        n = min(len(train_idx), len(test_idx))
+        train_sel = sorted(rng.choice(train_idx, size=n, replace=False).tolist())
+        test_sel = sorted(rng.choice(test_idx, size=n, replace=False).tolist())
+    else:
+        train_sel = sorted(rng.permutation(train_idx).tolist())
+        test_sel = sorted(rng.permutation(test_idx).tolist())
+    return (
+        Subset(train_dataset, train_sel),
+        Subset(test_dataset, test_sel),
+        len(train_sel),
+        len(test_sel),
+    )
+
+
+def sample_balanced_class_subsets(
+    train_dataset: Dataset,
+    test_dataset: Dataset,
+    class_label: int,
+    seed: int,
+) -> Tuple[Subset, Subset, int]:
+    member_subset, nonmember_subset, n_member, n_nonmember = sample_class_subsets(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        class_label=class_label,
+        seed=seed,
+        balance_classes=True,
+    )
+    if n_member != n_nonmember:
+        raise RuntimeError("Balanced subset sampling produced mismatched sizes.")
+    return member_subset, nonmember_subset, n_member

@@ -140,7 +140,6 @@ def save_classwise_history_csv(
 
 
 def save_classwise_percent_change_plot(
-    epochs: Sequence[int],
     history: np.ndarray,
     class_names: Sequence[str],
     out_path: str,

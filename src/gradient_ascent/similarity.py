@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import time
 from typing import Dict, Iterable, List, Optional, Union
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -19,14 +19,22 @@ def _cca_subsample_columns(
     """Reduce feature dimension before QR when d is large (same idea as SVCCA-style subsampling)."""
     if max_columns is None:
         return x, y
+    # If feature widths match, use a shared index set so identical activations
+    # (e.g. step-0 snapshots) keep the CCA identity behavior.
+    if x.shape[1] == y.shape[1] and x.shape[1] > max_columns:
+        rng = np.random.RandomState(seed)
+        idx = rng.choice(x.shape[1], size=max_columns, replace=False)
+        return x[:, idx], y[:, idx]
+
+    # Fallback for unequal widths: deterministic but independent index sets.
     rng_x = np.random.RandomState(seed)
     rng_y = np.random.RandomState(seed + 7919)
     if x.shape[1] > max_columns:
-        idx = rng_x.choice(x.shape[1], size=max_columns, replace=False)
-        x = x[:, idx]
+        idx_x = rng_x.choice(x.shape[1], size=max_columns, replace=False)
+        x = x[:, idx_x]
     if y.shape[1] > max_columns:
-        idx = rng_y.choice(y.shape[1], size=max_columns, replace=False)
-        y = y[:, idx]
+        idx_y = rng_y.choice(y.shape[1], size=max_columns, replace=False)
+        y = y[:, idx_y]
     return x, y
 
 
@@ -98,12 +106,19 @@ def _prepare_layer_array(
     return prepared
 
 
-def _subsample_columns_for_x_only(x: np.ndarray, max_columns: Optional[int], seed: int) -> np.ndarray:
+def _cca_subsample_columns_with_optional_reference_idx(
+    x: np.ndarray,
+    max_columns: Optional[int],
+    seed: int,
+    reference_idx: Optional[np.ndarray],
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
     if max_columns is None or x.shape[1] <= max_columns:
-        return x
+        return x, None
+    if reference_idx is not None and int(reference_idx.shape[0]) == int(max_columns):
+        return x[:, reference_idx], reference_idx
     rng_x = np.random.RandomState(seed)
     idx = rng_x.choice(x.shape[1], size=max_columns, replace=False)
-    return x[:, idx]
+    return x[:, idx], idx
 
 
 def prepare_activations_for_evaluation(
@@ -183,10 +198,14 @@ class CCA:
 
     def prepare_reference(self, y: Union[np.ndarray, torch.Tensor]) -> Dict[str, np.ndarray | int]:
         y_arr = _as_2d_float32(y)
-        y_arr = _subsample_columns_for_x_only(y_arr, self.max_columns, self.column_subsample_seed + 7919)
+        y_idx = None
+        if self.max_columns is not None and y_arr.shape[1] > self.max_columns:
+            rng_y = np.random.RandomState(self.column_subsample_seed + 7919)
+            y_idx = rng_y.choice(y_arr.shape[1], size=self.max_columns, replace=False)
+            y_arr = y_arr[:, y_idx]
         y_centered = self._center_data(y_arr)
         qy, _ = np.linalg.qr(y_centered, mode="reduced")
-        return {"qy": qy, "n_cols": int(y_arr.shape[1])}
+        return {"qy": qy, "n_cols": int(y_arr.shape[1]), "col_idx": y_idx}
 
     def compute_similarity_to_prepared_reference(
         self,
@@ -195,7 +214,21 @@ class CCA:
         return_correlations: bool = False,
     ) -> Union[float, tuple]:
         x_arr = _as_2d_float32(x)
-        x_arr = _subsample_columns_for_x_only(x_arr, self.max_columns, self.column_subsample_seed)
+        reference_idx = prepared_reference.get("col_idx")
+        if isinstance(reference_idx, np.ndarray):
+            x_arr, _ = _cca_subsample_columns_with_optional_reference_idx(
+                x_arr,
+                self.max_columns,
+                self.column_subsample_seed,
+                reference_idx,
+            )
+        else:
+            x_arr, _ = _cca_subsample_columns_with_optional_reference_idx(
+                x_arr,
+                self.max_columns,
+                self.column_subsample_seed,
+                None,
+            )
         slice_cap = min(int(x_arr.shape[1]), int(prepared_reference["n_cols"]))
 
         x_arr = self._center_data(x_arr)
@@ -475,6 +508,7 @@ def evaluate_pair_rows(
     metrics: Optional[Dict[str, object]] = None,
     max_activation_samples: Optional[int] = None,
     subsample_seed: int = 42,
+    metric_timing_seconds: Optional[Dict[str, float]] = None,
 ) -> List[dict]:
     metrics = metrics or build_default_metrics()
     layer_list = list(layers)
@@ -494,6 +528,7 @@ def evaluate_pair_rows(
             raise ValueError(f"Layer {layer}: mismatched sample counts {x.shape[0]} vs {y.shape[0]}")
         row = {"layer": layer, "n_samples": int(x.shape[0]), "n_features": int(x.shape[1])}
         for metric_name, metric in metrics.items():
+            metric_t0 = time.perf_counter()
             if metric_name == "cosine":
                 row[metric_name] = float(
                     np.mean(np.sum(x_prepared["row_norm"] * y_prepared["row_norm"], axis=1))
@@ -506,6 +541,10 @@ def evaluate_pair_rows(
                 row[metric_name] = _mean_symmetric_kl(x_prepared["prob"], y_prepared["prob"])
             else:
                 row[metric_name] = float(metric.compute_similarity(x, y))
+            if metric_timing_seconds is not None:
+                metric_timing_seconds[metric_name] = (
+                    float(metric_timing_seconds.get(metric_name, 0.0)) + (time.perf_counter() - metric_t0)
+                )
         rows.append(row)
     return rows
 
@@ -515,6 +554,7 @@ def evaluate_pair_rows_prepared(
     prepared_acts_b: Dict[str, Dict[str, object]],
     layers: Iterable[str] = DEFAULT_LAYER_NAMES,
     metrics: Optional[Dict[str, object]] = None,
+    metric_timing_seconds: Optional[Dict[str, float]] = None,
 ) -> List[dict]:
     """Evaluate similarity using precomputed activation transforms for both sides."""
     metrics = metrics or build_default_metrics()
@@ -529,6 +569,7 @@ def evaluate_pair_rows_prepared(
             raise ValueError(f"Layer {layer}: mismatched sample counts {x.shape[0]} vs {y.shape[0]}")
         row = {"layer": layer, "n_samples": int(x.shape[0]), "n_features": int(x.shape[1])}
         for metric_name, metric in metrics.items():
+            metric_t0 = time.perf_counter()
             if metric_name == "cosine":
                 row[metric_name] = float(np.mean(np.sum(x_prepared["row_norm"] * y_prepared["row_norm"], axis=1)))
             elif metric_name == "euclidean":
@@ -562,6 +603,10 @@ def evaluate_pair_rows_prepared(
                 )
             else:
                 row[metric_name] = float(metric.compute_similarity(x, y))
+            if metric_timing_seconds is not None:
+                metric_timing_seconds[metric_name] = (
+                    float(metric_timing_seconds.get(metric_name, 0.0)) + (time.perf_counter() - metric_t0)
+                )
         rows.append(row)
     return rows
 

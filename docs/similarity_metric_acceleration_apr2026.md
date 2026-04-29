@@ -142,6 +142,15 @@ and the notebook helper prints the CSV path after the trajectory pipeline finish
 
 **Why this is methodologically useful.** It makes runtime claims reproducible and allows direct aggregation across repeated runs (mean/variance) under fixed hardware and config.
 
+**April 29 logging clarification.** Similarity timing is now split into:
+
+- `similarity_<algo>_epoch_scoring`: snapshot loading/forward-pass + metric computation across epochs,
+- `similarity_<algo>_vs_<reference>_artifact_io`: CSV/plot generation and media logging for each reference,
+- `similarity_<algo>_artifact_io_total`: sum of per-reference artifact stages,
+- `similarity_<algo>_total`: full similarity wall-clock for that algorithm.
+
+This removes the confusing case where `similarity_<algo>_total` was much larger than `similarity_<algo>_vs_<reference>` entries, because the latter did not include epoch scoring work.
+
 ## 13. Precompute fixed reference-side linear algebra for CCA and linear CKA
 
 **Problem.** In trajectory analysis, each snapshot is compared against fixed references (`original`, `retrained`) for many epochs. Before this change, CCA and linear CKA recomputed reference-side centering and matrix factorizations at every epoch, even though the reference activations do not change.
@@ -162,3 +171,26 @@ At scoring time, snapshot activations only compute the snapshot-side terms and r
 
 - Kornblith, S., Norouzi, M., Lee, H., & Hinton, G. (2019). *Similarity of Neural Network Representations Revisited*. arXiv:1905.00414.
 - Hardoon, D. R., Szedmak, S., & Shawe-Taylor, J. (2004). *Canonical Correlation Analysis: An Overview with Application to Learning Methods*. Neural Computation, 16(12), 2639-2664.
+
+## 14. Shared-index CCA column subsampling for equal-width comparisons
+
+**Problem.** With CCA column subsampling enabled, using independent random feature indices for `X` and `Y` can produce scores below 1.0 even when comparing identical activations (for example, step 0 where the unlearning snapshot is exactly the original checkpoint). This is most visible in wider layers where subsampling is active.
+
+**Change.** When `X` and `Y` have the same feature width and subsampling is required, CCA now samples one shared feature index set and applies it to both matrices. For unequal widths, the implementation keeps deterministic independent subsampling.
+
+**Why this is valid.** In equal-width same-architecture comparisons, channels are aligned by construction. Applying the same random projection/subset to both sides preserves the identity case (`X == Y` implies CCA close to 1, up to numeric precision) while still reducing computational cost.
+
+## 15. Per-metric similarity timing figure per unlearning algorithm
+
+**Motivation.** The trajectory stage reports total similarity time, but that does not show which metric dominates runtime. For tuning and fair discussion in dissertation text, we need per-metric totals.
+
+**Change.**
+
+- `evaluate_pair_rows(...)` and `evaluate_pair_rows_prepared(...)` now accept an optional `metric_timing_seconds` accumulator and add elapsed time per metric call.
+- `run_trajectory_analysis(...)` allocates one accumulator per algorithm (`ga`, `ssd`, etc.), passes it through the multi-reference snapshot loop, and writes stage keys:
+  - `similarity_<algo>_metric_<metric>_seconds`
+- A timing bar figure is generated after each algorithm:
+  - `out/similarity_metric_timing_<algo>.png`
+- The notebook display pipeline now shows this timing figure in the trajectory output cell for each algorithm.
+
+**Why this is useful.** It makes metric-cost trade-offs explicit (for example, CCA vs linear CKA), so runtime optimisation decisions are justified with direct measurements rather than qualitative impressions.
