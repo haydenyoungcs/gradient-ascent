@@ -11,7 +11,6 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.utils.class_weight import compute_sample_weight
 
 from .training import build_amp_config
 from .trajectories import list_snapshot_paths
@@ -254,8 +253,6 @@ def mia_mlp(
     oof_scores = np.zeros(len(y), dtype=np.float64)
 
     for tr_idx, te_idx in cv_splits:
-        y_train = y[tr_idx]
-        train_sample_weight = compute_sample_weight(class_weight="balanced", y=y_train)
         clf = make_pipeline(
             StandardScaler(),
             MLPClassifier(
@@ -268,11 +265,7 @@ def mia_mlp(
                 random_state=int(seed),
             ),
         )
-        clf.fit(
-            x[tr_idx],
-            y_train,
-            mlpclassifier__sample_weight=train_sample_weight,
-        )
+        clf.fit(x[tr_idx], y[tr_idx])
         oof_scores[te_idx] = clf.predict_proba(x[te_idx])[:, 1]
     return _attack_summary(y, oof_scores, bootstrap_seed=int(seed) + 101, bootstrap_rounds=bootstrap_rounds)
 
