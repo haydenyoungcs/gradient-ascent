@@ -8,7 +8,7 @@ from matplotlib.animation import PillowWriter
 import numpy as np
 import torch
 
-from .reporting import orient_epoch_rows_for_similarity
+from .reporting import min_max_to_similarity_01, orient_epoch_rows_for_similarity
 
 
 EpochRows = Sequence[Tuple[int, List[dict]]]
@@ -263,25 +263,28 @@ def save_combined_similarity_mia_plot(
     mia_baseline: Dict[str, float],
     mia_panels: Sequence[Tuple[str, str]],
 ) -> str:
-    lower_better_metrics = list(lower_better_metrics)
+    lower_better_set = set(lower_better_metrics)
 
-    for metric_name in lower_better_metrics:
-        pooled = []
+    for metric_name in all_similarity_metrics:
+        pooled: list[float] = []
         for algo in algo_keys:
             pooled.extend(algo_similarity_series[algo][metric_name])
-        pooled = np.array(pooled, dtype=np.float64)
-        vmin = float(np.min(pooled))
-        vmax = float(np.max(pooled))
-
+        pooled_arr = np.array(pooled, dtype=np.float64)
+        lower_is_more_similar = metric_name in lower_better_set
         for algo in algo_keys:
             vals = np.array(algo_similarity_series[algo][metric_name], dtype=np.float64)
-            if vmax > vmin:
-                vals = (vals - vmin) / (vmax - vmin)
-            else:
-                vals = np.full_like(vals, 0.5)
-            algo_similarity_series[algo][metric_name] = list(1.0 - vals)
+            algo_similarity_series[algo][metric_name] = list(
+                min_max_to_similarity_01(
+                    vals,
+                    lower_is_more_similar=lower_is_more_similar,
+                    range_from=pooled_arr,
+                )
+            )
 
-    plot_metrics = [("similarity", metric, f"{metric} (scaled: higher=more similar)") for metric in all_similarity_metrics]
+    plot_metrics = [
+        ("similarity", metric, f"{metric} (rescaled vs pooled trajectories; 1 = most similar)")
+        for metric in all_similarity_metrics
+    ]
     plot_metrics += [("mia", metric, title) for metric, title in mia_panels]
 
     n_metrics = len(plot_metrics)

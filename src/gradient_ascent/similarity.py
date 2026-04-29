@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from .models import DEFAULT_LAYER_NAMES
+from .reporting import min_max_to_similarity_01
 
 
 def _cca_subsample_columns(
@@ -611,16 +612,19 @@ def evaluate_pair_rows_prepared(
     return rows
 
 
+_ROW_METADATA_KEYS = frozenset({"layer", "n_samples", "n_features", "epoch"})
+
+
 def transform_rows_for_plot(rows: List[dict], lower_better_metrics: Iterable[str] = LOWER_BETTER_METRICS) -> List[dict]:
+    """Min–max each metric across ``rows`` (typically one step's layers) to [0, 1], 1 = most similar."""
+    lower = set(lower_better_metrics)
     transformed = [{k: v for k, v in row.items()} for row in rows]
-    for metric_name in lower_better_metrics:
+    if not rows:
+        return transformed
+    metric_keys = [key for key in rows[0].keys() if key not in _ROW_METADATA_KEYS]
+    for metric_name in metric_keys:
         vals = np.array([row[metric_name] for row in rows], dtype=np.float64)
-        vmin = float(np.min(vals))
-        vmax = float(np.max(vals))
-        if vmax > vmin:
-            sim_vals = 1.0 - ((vals - vmin) / (vmax - vmin))
-        else:
-            sim_vals = np.full_like(vals, 0.5)
+        scaled = min_max_to_similarity_01(vals, lower_is_more_similar=(metric_name in lower))
         for idx in range(len(transformed)):
-            transformed[idx][metric_name] = float(sim_vals[idx])
+            transformed[idx][metric_name] = float(scaled[idx])
     return transformed

@@ -8,6 +8,29 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def min_max_to_similarity_01(
+    values: np.ndarray,
+    *,
+    lower_is_more_similar: bool,
+    range_from: np.ndarray | None = None,
+) -> np.ndarray:
+    """Map raw metric values to [0, 1] so 1 always means most similar and 0 least similar.
+
+    Min and max are taken from ``range_from`` when provided (e.g. all algorithms' epochs
+    pooled together); otherwise from ``values`` itself. For metrics where *smaller* raw
+    scores mean more similar (e.g. Euclidean distance, KL), set ``lower_is_more_similar=True``.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    ref = np.asarray(range_from, dtype=np.float64) if range_from is not None else arr
+    vmin = float(np.min(ref))
+    vmax = float(np.max(ref))
+    if vmax > vmin:
+        if lower_is_more_similar:
+            return (vmax - arr) / (vmax - vmin)
+        return (arr - vmin) / (vmax - vmin)
+    return np.full_like(arr, 0.5)
+
+
 def save_similarity_trajectory_csv(
     epoch_rows: Sequence[Tuple[int, List[dict]]],
     out_path: str,
@@ -28,27 +51,28 @@ def orient_epoch_rows_for_similarity(
     metric_names: Iterable[str],
     lower_better_metrics: Iterable[str],
 ) -> Sequence[Tuple[int, List[dict]]]:
-    """Return rows with all metrics oriented to higher = more similar."""
+    """Return rows with every metric min–max rescaled to [0, 1], 1 = most similar in the set.
+
+    Pooling is over all (epoch, layer) cells in ``epoch_rows`` for each metric, matching the
+    evolving bar plots and summary figures. Raw ``euclidean`` / ``kl_sym`` are distances or
+    divergences (lower = more similar); they are inverted so that, like CKA/CCA/cosine, a
+    rescaled value of 1 means best match seen in that comparison and 0 means worst.
+    """
     metric_names = list(metric_names)
     lower_better_metrics = set(lower_better_metrics)
     oriented_rows = [(epoch, [{**row} for row in rows]) for epoch, rows in epoch_rows]
 
     for metric_name in metric_names:
-        if metric_name not in lower_better_metrics:
-            continue
         vals = np.array(
             [float(row[metric_name]) for _epoch, rows in oriented_rows for row in rows],
             dtype=np.float64,
         )
-        vmin = float(np.min(vals))
-        vmax = float(np.max(vals))
+        scaled_all = min_max_to_similarity_01(vals, lower_is_more_similar=(metric_name in lower_better_metrics))
+        flat_idx = 0
         for _epoch, rows in oriented_rows:
             for row in rows:
-                val = float(row[metric_name])
-                if vmax > vmin:
-                    row[metric_name] = 1.0 - ((val - vmin) / (vmax - vmin))
-                else:
-                    row[metric_name] = 0.5
+                row[metric_name] = float(scaled_all[flat_idx])
+                flat_idx += 1
     return oriented_rows
 
 

@@ -707,7 +707,7 @@ def run_trajectory_analysis(
                 epoch_rows,
                 summary_plot_path,
                 f"{algorithm_key.upper()} vs {reference_key.capitalize()} over unlearning steps "
-                "(all metrics scaled to higher = more similar)",
+                "(all metrics min–max rescaled to [0, 1] vs this run; 1 = most similar)",
                 metric_names,
                 lower_better_metrics,
             )
