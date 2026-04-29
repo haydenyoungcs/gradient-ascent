@@ -353,7 +353,7 @@ def run_notebook_core_experiment(
 
 def prepare_similarity_setup(
     *,
-    cca_max_columns: Optional[int] = 512,
+    cca_max_columns: Optional[int] = 256,
     cca_column_subsample_seed: int = 43,
 ) -> SimilaritySetup:
     """Return the notebook's default similarity-analysis configuration."""
@@ -588,7 +588,6 @@ def run_and_display_notebook_trajectory_pipeline(
             def _render_gifs(*_args):
                 with gif_out:
                     clear_output(wait=True)
-                    display(IPyImage(filename=similarity_artifact.summary_plot_path))
                     if not bool(hide_gifs_checkbox.value):
                         display(IPyImage(filename=similarity_artifact.evolving_bar_plot_path))
                         display(IPyImage(filename=similarity_artifact.grouped_evolving_bar_plot_path))

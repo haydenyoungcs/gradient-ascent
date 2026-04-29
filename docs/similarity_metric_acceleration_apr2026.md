@@ -22,11 +22,16 @@ This note records why acceleration changes were made to the trajectory similarit
 
 **SVD without U and V.** The CCA path only needs singular values of `qx.T @ qy`. Calling `numpy.linalg.svd(..., compute_uv=False)` skips the expensive construction of the full orthogonal factors while returning the same singular values (up to floating-point noise).
 
-**Optional column subsampling.** QR on an `n × d` activation matrix is costly when `d` is large (e.g. ResNet block channels). Before centering, we can randomly subsample columns (neurons) to a cap (`cca_max_columns`, default `512` in `TrajectoryExperimentConfig` / `prepare_similarity_setup`). This is a Monte Carlo estimate over features, analogous in spirit to dimensionality reduction used in SVCCA (Raghu et al., 2017, *SVCCA: Singular Vector Canonical Correlation Analysis for deep learning dynamics and interpretability*). Set `cca_max_columns=None` for the previous full-width CCA (slowest, closest to the exact wide-matrix pipeline).
+**Optional column subsampling.** QR on an `n × d` activation matrix is costly when `d` is large (e.g. ResNet block channels). Before centering, we can randomly subsample columns (neurons) to a cap (`cca_max_columns`, now default `256` in `TrajectoryExperimentConfig` / `prepare_similarity_setup`; previously `512`). This is a Monte Carlo estimate over features, analogous in spirit to dimensionality reduction used in SVCCA (Raghu et al., 2017, *SVCCA: Singular Vector Canonical Correlation Analysis for deep learning dynamics and interpretability*). Set `cca_max_columns=None` for the previous full-width CCA (slowest, closest to the exact wide-matrix pipeline).
 
 ## 4. Notebook / cell progress lines
 
-During the trajectory similarity stage, `TrajectoryExperimentConfig.log_similarity_progress` (default `True`) prints two lines per unlearning snapshot epoch: when activations are collected and when similarity scoring starts (`compute_epoch_rows_from_snapshots` in `trajectories.py`). Per-layer / per-metric lines are not printed. Set `log_similarity_progress=False` to disable these epoch lines as well.
+During the trajectory similarity stage, `TrajectoryExperimentConfig.log_similarity_progress` (default `True`) controls epoch-level progress prints in `compute_epoch_rows_from_snapshots_multi_reference` (`trajectories.py`):
+
+- when activations are being collected for an unlearning step (emitted once per step when activations are not loaded from cache),
+- when similarity scoring starts for each reference (`retrained`, `original`) at that step.
+
+Per-layer / per-metric lines are not printed. Set `log_similarity_progress=False` to disable these progress lines.
 
 ## 5. Reuse snapshot activations across both references
 
@@ -194,3 +199,17 @@ At scoring time, snapshot activations only compute the snapshot-side terms and r
 - The notebook display pipeline now shows this timing figure in the trajectory output cell for each algorithm.
 
 **Why this is useful.** It makes metric-cost trade-offs explicit (for example, CCA vs linear CKA), so runtime optimisation decisions are justified with direct measurements rather than qualitative impressions.
+
+## 16. Optional similarity step stride (compute fewer unlearning steps)
+
+**Motivation.** CCA remains the dominant cost in full trajectory runs. During exploratory sweeps, evaluating every single unlearning checkpoint can be unnecessary.
+
+**Change.** Added `TrajectoryExperimentConfig.similarity_step_stride` (default `1`):
+
+- `1`: compute similarity at every unlearning step (full trajectory),
+- `2`: compute every other step (`0, 2, 4, ...`),
+- `k`: compute steps where `step % k == 0`.
+
+This filtering happens in `compute_epoch_rows_from_snapshots_multi_reference(...)`.
+
+**Trade-off.** Larger stride reduces runtime roughly proportionally, but with coarser temporal resolution of similarity trends.

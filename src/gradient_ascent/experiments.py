@@ -126,13 +126,17 @@ class TrajectoryExperimentConfig:
     log_similarity_progress: bool = True
     cache_similarity_activations: bool = True
     similarity_activation_cache_subdir: str = "similarity_activation_cache"
-    cca_max_columns: Optional[int] = 512
+    cca_max_columns: Optional[int] = 256
     cca_column_subsample_seed: int = 43
+    similarity_step_stride: int = 1
     mia_seed: int = 1337
     mia_fixed_cv_across_epochs: bool = True
     mia_include_mlp_attacker: bool = True
     mia_balance_probe_classes: bool = False
     mia_bootstrap_rounds: int = 200
+    mia_mlp_sweep_enabled: bool = True
+    mia_mlp_sweep_hidden_layer_sizes: tuple[tuple[int, ...], ...] = ((64, 32), (128, 64), (64,))
+    mia_mlp_sweep_alphas: tuple[float, ...] = (1e-4, 1e-3)
 
 
 @dataclass(frozen=True)
@@ -168,10 +172,10 @@ class CombinedComparisonConfig:
     reference_key: str = "retrained"
     lower_better_metrics: Sequence[str] = ("euclidean", "kl_sym")
     mia_panels: Sequence[tuple[str, str]] = (
-        ("forget_loss_auc", "Forget loss AUC (lower = less inferable)"),
-        ("forget_logreg_auc", "Forget logreg AUC (lower = less inferable)"),
-        ("forget_logreg_advantage", "Forget logreg advantage (lower = less inferable)"),
-        ("forget_logreg_mean_member_prob", "Forget logreg mean member prob (lower = less inferable)"),
+        ("forget_logreg_auc", "Forget LogReg AUC (lower = less inferable)"),
+        ("forget_logreg_advantage", "Forget LogReg advantage (lower = less inferable)"),
+        ("forget_mlp_auc", "Forget MLP AUC (lower = less inferable)"),
+        ("forget_mlp_advantage", "Forget MLP advantage (lower = less inferable)"),
     )
 
 
@@ -672,6 +676,7 @@ def run_trajectory_analysis(
             ),
             activation_preparer=snapshot_activation_preparer or reference_activation_preparer,
             metric_timing_seconds=metric_timing_seconds_algo,
+            step_stride=config.similarity_step_stride,
         )
         scoring_elapsed = time.perf_counter() - scoring_t0
         stage_timing_seconds[f"similarity_{algorithm_key}_epoch_scoring"] = scoring_elapsed
@@ -842,6 +847,9 @@ def run_trajectory_analysis(
         seed=config.mia_seed,
         include_mlp_attacker=config.mia_include_mlp_attacker,
         bootstrap_rounds=config.mia_bootstrap_rounds,
+        mlp_sweep_enabled=config.mia_mlp_sweep_enabled,
+        mlp_sweep_hidden_layer_sizes=config.mia_mlp_sweep_hidden_layer_sizes,
+        mlp_sweep_alphas=config.mia_mlp_sweep_alphas,
     )
     mia_baseline_csv_path = save_mia_baseline_csv(mia_baseline, f"{config.out_dir}/mia_retrained_baseline.csv")
 
@@ -861,11 +869,19 @@ def run_trajectory_analysis(
     )
 
     mia_panel_metrics = [
-        ("forget_loss_auc", "Loss-threshold AUC (lower = less inferable)"),
         ("forget_logreg_auc", "LogReg AUC (lower = less inferable)"),
         ("forget_logreg_advantage", "LogReg advantage (lower = less inferable)"),
-        ("forget_logreg_mean_member_prob", "LogReg mean member prob (lower = less inferable)"),
     ]
+    if config.mia_include_mlp_attacker:
+        mia_panel_metrics += [
+            ("forget_mlp_auc", "MLP AUC (lower = less inferable)"),
+            ("forget_mlp_advantage", "MLP advantage (lower = less inferable)"),
+        ]
+    else:
+        mia_panel_metrics += [
+            ("forget_loss_auc", "Loss-threshold AUC (lower = less inferable)"),
+            ("forget_logreg_mean_member_prob", "LogReg mean member prob (lower = less inferable)"),
+        ]
 
     mia_artifacts: Dict[str, MIAArtifact] = {}
     for algorithm_key, snapshot_dir in snapshot_dirs.items():
@@ -884,6 +900,10 @@ def run_trajectory_analysis(
             fixed_cv_across_epochs=config.mia_fixed_cv_across_epochs,
             include_mlp_attacker=config.mia_include_mlp_attacker,
             bootstrap_rounds=config.mia_bootstrap_rounds,
+            progress_log_prefix=f"[MIA {algorithm_key.upper()}]",
+            mlp_sweep_enabled=config.mia_mlp_sweep_enabled,
+            mlp_sweep_hidden_layer_sizes=config.mia_mlp_sweep_hidden_layer_sizes,
+            mlp_sweep_alphas=config.mia_mlp_sweep_alphas,
         )
         csv_path = save_mia_trajectory_csv(rows, f"{config.out_dir}/mia_vs_unlearning_epoch_{algorithm_key}.csv")
         grid_plot_path = save_mia_metric_grid_plot(

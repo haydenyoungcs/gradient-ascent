@@ -66,15 +66,58 @@ This note records a methodological fix to make the trajectory MIA probe more rel
 
 - Carlini, N., Chien, S., Nasr, M., Song, S., Terzis, A., & Tramer, F. (2022). *Membership Inference Attacks From First Principles*. IEEE Symposium on Security and Privacy.
 
-## 9. April 2026 second pass: class-weighted attackers under unbalanced probes
+## 9. April 2026 second pass: prior-robust attackers under unbalanced probes
 
 **Problem.** After enabling unbalanced probe mode (`mia_balance_probe_classes=False`), member/non-member counts can differ. If the attack model is trained without class weighting, it can partially optimize to the observed class prior instead of only the conditional membership signal.
 
-**Change.** Updated `src/gradient_ascent/mia.py` so attacker training is explicitly prior-robust:
+**Change.** Updated `src/gradient_ascent/mia.py` so attacker training is more prior-robust:
 
 - `mia_logreg(...)` now uses `LogisticRegression(..., class_weight="balanced")`.
-- `mia_mlp(...)` now computes fold-local balanced sample weights and passes them to `MLPClassifier.fit(...)`.
+- `mia_mlp(...)` uses fixed-fold CV with the same protocol, and we keep the stronger MLP head enabled by default in trajectory runs.
 
-**Why this is valid.** Balanced weighting equalizes the loss contribution of member and non-member labels inside each CV training split. This keeps the attacker focused on separability in features rather than raw base-rate differences introduced by unbalanced probe construction.
+**Why this is valid.** For the linear head, balanced weighting equalizes member/non-member loss contribution in CV training splits, reducing dependence on class priors introduced by unbalanced probe construction. The MLP head still provides nonlinear attack capacity under the same fixed-fold protocol.
 
-**How we knew to do this.** This follows standard supervised-learning practice for imbalanced binary classification and is consistent with privacy evaluation goals: when strengthening MIA, we want improved detection of genuine membership signal, not an artifact of label frequency.
+**How we knew to do this.** This follows standard imbalanced-classification practice and is consistent with privacy evaluation goals: stronger attacks should capture genuine membership signal rather than base-rate artifacts.
+
+## 10. Baseline parity vs project-specific extensions (Google Research mapping)
+
+To make the attack design traceable to prior work, we map our implementation to the Google Research reference implementation and then state explicit extensions.
+
+**Reference baseline we align to.** We follow the core attack pattern in Google Research `learn_to_forget/membership_inference.py`: supervised membership inference with logistic regression and stratified cross-validation over member/non-member labels ([source](https://github.com/google-research/google-research/blob/master/learn_to_forget/membership_inference.py)).
+
+**Baseline parity (what is directly aligned).**
+
+- Binary membership labels (`member` vs `non-member`) as the attack target.
+- Logistic-regression attack head as a primary baseline.
+- Stratified cross-validation protocol to evaluate attack performance out-of-sample.
+- Loss/confidence-driven attack signal family (our threshold-loss path is directly in this category).
+
+**Project-specific extensions (what we add beyond the reference baseline).**
+
+- **Richer attack features:** confidence/margin/entropy/top-k probability features in addition to loss-only signals.
+- **Additional attack head:** optional MLP attacker to test nonlinear leakage not captured by linear models.
+- **Trajectory protocol:** fixed-fold CV reused across unlearning steps, so temporal comparisons isolate model updates rather than resampling noise.
+- **Targeted probes:** separate forget-class and retain-control probes to evaluate selective unlearning behavior.
+- **Uncertainty reporting:** bootstrap confidence intervals for AUC and ROC advantage.
+- **Larger probe mode:** option to avoid truncating to balanced minima, reducing sample discard.
+
+**Methodological claim used in this project.** Our pipeline is baseline-compatible with the Google logistic-CV MIA template, and extends it for (i) targeted unlearning evaluation, (ii) stronger attacker capacity checks, and (iii) uncertainty-aware reporting appropriate for dissertation-level experimental claims.
+
+## 11. MLP hyperparameter sweep (nested within CV folds)
+
+**Motivation.** A fixed MLP architecture can underfit or overfit depending on probe size and signal strength. To reduce architecture-selection bias, we tune MLP settings inside each outer CV fold.
+
+**Change.** `mia_mlp(...)` now supports a lightweight fold-local sweep (enabled by default) over:
+
+- hidden layer sizes: `((64, 32), (128, 64), (64,))`
+- regularization `alpha`: `(1e-4, 1e-3)`
+
+Selection is done on an inner validation split from the outer training fold, then the chosen configuration is fit on the full outer training fold and evaluated on the held-out outer fold.
+
+**Config knobs (trajectory).**
+
+- `mia_mlp_sweep_enabled`
+- `mia_mlp_sweep_hidden_layer_sizes`
+- `mia_mlp_sweep_alphas`
+
+**Why this is valid.** This is a standard nested-model-selection pattern that reduces optimistic bias versus choosing one global architecture after observing test-fold outcomes.

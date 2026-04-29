@@ -320,6 +320,13 @@ def save_mia_metric_grid_plot(
         ax = axes[idx]
         vals = [float(row[metric_key]) for row in rows]
         ax.plot(epochs, vals, marker="o", linewidth=2, label=algorithm_label)
+        ci_low_key = f"{metric_key}_ci_low"
+        ci_high_key = f"{metric_key}_ci_high"
+        if ci_low_key in rows[0] and ci_high_key in rows[0]:
+            ci_low = np.array([float(row[ci_low_key]) for row in rows], dtype=np.float64)
+            ci_high = np.array([float(row[ci_high_key]) for row in rows], dtype=np.float64)
+            if np.all(np.isfinite(ci_low)) and np.all(np.isfinite(ci_high)):
+                ax.fill_between(epochs, ci_low, ci_high, alpha=0.2, label="95% CI")
         if metric_key in baseline:
             ax.axhline(baseline[metric_key], linestyle="--", linewidth=1.8, color="black", label="Retrained baseline")
         ax.set_title(metric_label)

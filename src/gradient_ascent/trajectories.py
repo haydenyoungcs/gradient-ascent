@@ -61,10 +61,15 @@ def compute_epoch_rows_from_snapshots_multi_reference(
     activation_cache_dir: Optional[str] = None,
     activation_preparer: Optional[Callable[[Dict[str, np.ndarray]], Dict[str, object]]] = None,
     metric_timing_seconds: Optional[Dict[str, float]] = None,
+    step_stride: int = 1,
 ) -> Dict[str, List[Tuple[int, List[dict]]]]:
     """Compute snapshot activations once, then score against multiple references."""
+    if int(step_stride) <= 0:
+        raise ValueError(f"step_stride must be >= 1, got {step_stride}")
     rows_by_reference: Dict[str, List[Tuple[int, List[dict]]]] = {key: [] for key in reference_acts_map}
     for epoch_num, checkpoint_path in list_snapshot_paths(snapshot_dir):
+        if int(epoch_num) % int(step_stride) != 0:
+            continue
         cache_path = (
             _activation_cache_path(activation_cache_dir, epoch_num) if activation_cache_dir is not None else None
         )
@@ -79,7 +84,7 @@ def compute_epoch_rows_from_snapshots_multi_reference(
                 None,
             )
             if any_prefix:
-                print(f"{any_prefix} epoch={epoch_num} | collecting activations...", flush=True)
+                print(f"{any_prefix} unlearning_step={epoch_num} | collecting activations...", flush=True)
             acts_t = activation_collector(model)
             if cache_path is not None:
                 _save_cached_activations(cache_path, acts_t)
@@ -94,7 +99,7 @@ def compute_epoch_rows_from_snapshots_multi_reference(
             similarity_log_prefix = (similarity_log_prefix_map or {}).get(reference_key)
             if similarity_log_prefix:
                 print(
-                    f"{similarity_log_prefix} epoch={epoch_num} | computing similarity scores...",
+                    f"{similarity_log_prefix} unlearning_step={epoch_num} | computing similarity scores...",
                     flush=True,
                 )
             rows = pair_evaluator(acts_for_evaluation, reference_acts, similarity_log_prefix, metric_timing_seconds)

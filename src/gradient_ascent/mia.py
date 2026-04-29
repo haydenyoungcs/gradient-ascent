@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -237,6 +238,9 @@ def mia_mlp(
     seed: int = 0,
     cv_splits: Optional[Sequence[Tuple[np.ndarray, np.ndarray]]] = None,
     bootstrap_rounds: int = 200,
+    sweep_enabled: bool = True,
+    sweep_hidden_layer_sizes: Optional[Sequence[Tuple[int, ...]]] = None,
+    sweep_alphas: Optional[Sequence[float]] = None,
 ) -> Dict[str, float]:
     x_member = np.asarray(member_features, dtype=np.float64)
     x_nonmember = np.asarray(nonmember_features, dtype=np.float64)
@@ -251,18 +255,54 @@ def mia_mlp(
     if cv_splits is None:
         cv_splits = build_fixed_cv_splits(len(x_member), len(x_nonmember), seed=seed, max_splits=5)
     oof_scores = np.zeros(len(y), dtype=np.float64)
+    sweep_hidden_layer_sizes = tuple(sweep_hidden_layer_sizes or ((64, 32), (128, 64), (64,)))
+    sweep_alphas = tuple(float(alpha) for alpha in (sweep_alphas or (1e-4, 1e-3)))
 
-    for tr_idx, te_idx in cv_splits:
+    for fold_idx, (tr_idx, te_idx) in enumerate(cv_splits):
+        best_cfg = (64, 32), 1e-4
+        if sweep_enabled:
+            fold_skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=int(seed) + int(fold_idx) + 17)
+            inner_tr_rel, inner_val_rel = next(fold_skf.split(x[tr_idx], y[tr_idx]))
+            x_inner_tr = x[tr_idx][inner_tr_rel]
+            y_inner_tr = y[tr_idx][inner_tr_rel]
+            x_inner_val = x[tr_idx][inner_val_rel]
+            y_inner_val = y[tr_idx][inner_val_rel]
+            best_score = -np.inf
+            for hidden_sizes in sweep_hidden_layer_sizes:
+                for alpha in sweep_alphas:
+                    clf_inner = make_pipeline(
+                        StandardScaler(),
+                        MLPClassifier(
+                            hidden_layer_sizes=hidden_sizes,
+                            activation="relu",
+                            alpha=float(alpha),
+                            max_iter=400,
+                            early_stopping=True,
+                            n_iter_no_change=12,
+                            random_state=int(seed) + int(fold_idx),
+                        ),
+                    )
+                    try:
+                        clf_inner.fit(x_inner_tr, y_inner_tr)
+                        probs = clf_inner.predict_proba(x_inner_val)[:, 1]
+                        score = float(roc_auc_score(y_inner_val, probs))
+                    except Exception:
+                        score = -np.inf
+                    if score > best_score:
+                        best_score = score
+                        best_cfg = hidden_sizes, float(alpha)
+
+        hidden_sizes, alpha = best_cfg
         clf = make_pipeline(
             StandardScaler(),
             MLPClassifier(
-                hidden_layer_sizes=(64, 32),
+                hidden_layer_sizes=hidden_sizes,
                 activation="relu",
-                alpha=1e-4,
+                alpha=float(alpha),
                 max_iter=400,
                 early_stopping=True,
                 n_iter_no_change=12,
-                random_state=int(seed),
+                random_state=int(seed) + int(fold_idx),
             ),
         )
         clf.fit(x[tr_idx], y[tr_idx])
@@ -279,6 +319,9 @@ def evaluate_probe_mia_metrics(
     cv_splits: Optional[Sequence[Tuple[np.ndarray, np.ndarray]]] = None,
     include_mlp_attacker: bool = False,
     bootstrap_rounds: int = 200,
+    mlp_sweep_enabled: bool = True,
+    mlp_sweep_hidden_layer_sizes: Optional[Sequence[Tuple[int, ...]]] = None,
+    mlp_sweep_alphas: Optional[Sequence[float]] = None,
 ) -> Dict[str, Dict[str, float]]:
     member_stats = collect_attack_stats(model, member_loader, device)
     nonmember_stats = collect_attack_stats(model, nonmember_loader, device)
@@ -305,6 +348,9 @@ def evaluate_probe_mia_metrics(
             seed=seed,
             cv_splits=cv_splits,
             bootstrap_rounds=bootstrap_rounds,
+            sweep_enabled=mlp_sweep_enabled,
+            sweep_hidden_layer_sizes=mlp_sweep_hidden_layer_sizes,
+            sweep_alphas=mlp_sweep_alphas,
         )
     return metrics
 
@@ -369,6 +415,9 @@ def compute_mia_baseline(
     seed: int,
     include_mlp_attacker: bool = False,
     bootstrap_rounds: int = 200,
+    mlp_sweep_enabled: bool = True,
+    mlp_sweep_hidden_layer_sizes: Optional[Sequence[Tuple[int, ...]]] = None,
+    mlp_sweep_alphas: Optional[Sequence[float]] = None,
 ) -> Dict[str, float]:
     forget_cv_splits = build_fixed_cv_splits(
         len(forget_member_loader.dataset),
@@ -389,6 +438,9 @@ def compute_mia_baseline(
         cv_splits=forget_cv_splits,
         include_mlp_attacker=include_mlp_attacker,
         bootstrap_rounds=bootstrap_rounds,
+        mlp_sweep_enabled=mlp_sweep_enabled,
+        mlp_sweep_hidden_layer_sizes=mlp_sweep_hidden_layer_sizes,
+        mlp_sweep_alphas=mlp_sweep_alphas,
     )
     retain_metrics = evaluate_probe_mia_metrics(
         model,
@@ -399,6 +451,9 @@ def compute_mia_baseline(
         cv_splits=retain_cv_splits,
         include_mlp_attacker=include_mlp_attacker,
         bootstrap_rounds=bootstrap_rounds,
+        mlp_sweep_enabled=mlp_sweep_enabled,
+        mlp_sweep_hidden_layer_sizes=mlp_sweep_hidden_layer_sizes,
+        mlp_sweep_alphas=mlp_sweep_alphas,
     )
     row = flatten_mia_metrics_row(0, forget_metrics, retain_metrics)
     baseline = {
@@ -433,6 +488,10 @@ def compute_mia_trajectory_rows(
     fixed_cv_across_epochs: bool = True,
     include_mlp_attacker: bool = False,
     bootstrap_rounds: int = 200,
+    progress_log_prefix: Optional[str] = None,
+    mlp_sweep_enabled: bool = True,
+    mlp_sweep_hidden_layer_sizes: Optional[Sequence[Tuple[int, ...]]] = None,
+    mlp_sweep_alphas: Optional[Sequence[float]] = None,
 ) -> List[Dict[str, float]]:
     rows: List[Dict[str, float]] = []
     forget_cv_splits = None
@@ -449,6 +508,9 @@ def compute_mia_trajectory_rows(
             seed=seed_base + 100,
         )
     for epoch_num, checkpoint_path in list_snapshot_paths(snapshot_dir):
+        step_t0 = time.perf_counter()
+        if progress_log_prefix:
+            print(f"{progress_log_prefix} unlearning_step={epoch_num} | running MIA probes...", flush=True)
         model = model_factory()
         model.load_state_dict(torch.load(checkpoint_path, map_location=map_location))
         model.eval()
@@ -462,6 +524,9 @@ def compute_mia_trajectory_rows(
             cv_splits=forget_cv_splits,
             include_mlp_attacker=include_mlp_attacker,
             bootstrap_rounds=bootstrap_rounds,
+            mlp_sweep_enabled=mlp_sweep_enabled,
+            mlp_sweep_hidden_layer_sizes=mlp_sweep_hidden_layer_sizes,
+            mlp_sweep_alphas=mlp_sweep_alphas,
         )
         retain_metrics = evaluate_probe_mia_metrics(
             model,
@@ -472,7 +537,15 @@ def compute_mia_trajectory_rows(
             cv_splits=retain_cv_splits,
             include_mlp_attacker=include_mlp_attacker,
             bootstrap_rounds=bootstrap_rounds,
+            mlp_sweep_enabled=mlp_sweep_enabled,
+            mlp_sweep_hidden_layer_sizes=mlp_sweep_hidden_layer_sizes,
+            mlp_sweep_alphas=mlp_sweep_alphas,
         )
         rows.append(flatten_mia_metrics_row(epoch_num, forget_metrics, retain_metrics))
+        if progress_log_prefix:
+            print(
+                f"{progress_log_prefix} unlearning_step={epoch_num} | done in {time.perf_counter() - step_t0:.1f}s",
+                flush=True,
+            )
 
     return rows
