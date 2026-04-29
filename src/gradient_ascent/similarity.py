@@ -30,6 +30,113 @@ def _cca_subsample_columns(
     return x, y
 
 
+def _as_2d_float32(array: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
+    if isinstance(array, torch.Tensor):
+        array = array.detach().cpu().numpy()
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+    elif array.ndim > 2:
+        array = array.reshape(array.shape[0], -1)
+    return np.ascontiguousarray(array, dtype=np.float32)
+
+
+def _row_normalize(array: np.ndarray, epsilon: float = 1e-8) -> np.ndarray:
+    return array / (np.linalg.norm(array, axis=1, keepdims=True) + epsilon)
+
+
+def _to_probability_rows(array: np.ndarray, epsilon: float = 1e-8) -> np.ndarray:
+    stable = np.abs(array) + epsilon
+    return stable / np.sum(stable, axis=1, keepdims=True)
+
+
+def _mean_symmetric_kl(p: np.ndarray, q: np.ndarray, epsilon: float = 1e-8) -> float:
+    q_stable = q + epsilon
+    p_stable = p + epsilon
+    kl_pq = np.mean(np.sum(p * np.log(p / q_stable), axis=1))
+    kl_qp = np.mean(np.sum(q * np.log(q / p_stable), axis=1))
+    return float(0.5 * (kl_pq + kl_qp))
+
+
+def _needs_row_normalized(metrics: Dict[str, object]) -> bool:
+    return any(name in metrics for name in ("cosine", "euclidean"))
+
+
+def _needs_probability_rows(metrics: Dict[str, object]) -> bool:
+    return "kl_sym" in metrics
+
+
+def _build_activation_index(
+    acts: Dict[str, np.ndarray],
+    layers: Iterable[str],
+    max_activation_samples: Optional[int],
+    subsample_seed: int,
+) -> Optional[np.ndarray]:
+    layer_list = list(layers)
+    if max_activation_samples is None or not layer_list:
+        return None
+    n = int(acts[layer_list[0]].shape[0])
+    if n <= max_activation_samples:
+        return None
+    rng = np.random.RandomState(subsample_seed)
+    return rng.choice(n, size=max_activation_samples, replace=False)
+
+
+def _prepare_layer_array(
+    array: np.ndarray,
+    idx: Optional[np.ndarray],
+    need_norm: bool,
+    need_prob: bool,
+) -> Dict[str, np.ndarray]:
+    x = _as_2d_float32(array)
+    if idx is not None:
+        x = x[idx]
+    prepared: Dict[str, np.ndarray] = {"raw": x}
+    if need_norm:
+        prepared["row_norm"] = _row_normalize(x)
+    if need_prob:
+        prepared["prob"] = _to_probability_rows(x)
+    return prepared
+
+
+def _subsample_columns_for_x_only(x: np.ndarray, max_columns: Optional[int], seed: int) -> np.ndarray:
+    if max_columns is None or x.shape[1] <= max_columns:
+        return x
+    rng_x = np.random.RandomState(seed)
+    idx = rng_x.choice(x.shape[1], size=max_columns, replace=False)
+    return x[:, idx]
+
+
+def prepare_activations_for_evaluation(
+    acts: Dict[str, np.ndarray],
+    *,
+    layers: Iterable[str] = DEFAULT_LAYER_NAMES,
+    metrics: Optional[Dict[str, object]] = None,
+    max_activation_samples: Optional[int] = None,
+    subsample_seed: int = 42,
+    precompute_metric_reference_cache: bool = False,
+) -> Dict[str, Dict[str, object]]:
+    """Precompute reusable per-layer transforms for repeated similarity calls."""
+    metrics = metrics or build_default_metrics()
+    layer_list = list(layers)
+    idx = _build_activation_index(acts, layer_list, max_activation_samples, subsample_seed)
+    need_norm = _needs_row_normalized(metrics)
+    need_prob = _needs_probability_rows(metrics)
+    prepared_map = {}
+    for layer in layer_list:
+        prepared = _prepare_layer_array(acts[layer], idx=idx, need_norm=need_norm, need_prob=need_prob)
+        if precompute_metric_reference_cache:
+            metric_cache: Dict[str, object] = {}
+            for metric_name, metric in metrics.items():
+                if metric_name == "cca" and isinstance(metric, CCA):
+                    metric_cache["cca"] = metric.prepare_reference(prepared["raw"])
+                elif metric_name == "cka_linear" and isinstance(metric, CKA) and metric.kernel == "linear":
+                    metric_cache["cka_linear"] = metric.prepare_linear_reference(prepared["raw"])
+            if metric_cache:
+                prepared["metric_reference_cache"] = metric_cache
+        prepared_map[layer] = prepared
+    return prepared_map
+
+
 class CCA:
     def __init__(
         self,
@@ -50,21 +157,10 @@ class CCA:
         y: Union[np.ndarray, torch.Tensor],
         return_correlations: bool = False,
     ) -> Union[float, tuple]:
-        if isinstance(x, torch.Tensor):
-            x = x.detach().cpu().numpy()
-        if isinstance(y, torch.Tensor):
-            y = y.detach().cpu().numpy()
-
-        if x.ndim > 2:
-            x = x.reshape(x.shape[0], -1)
-        if y.ndim > 2:
-            y = y.reshape(y.shape[0], -1)
-
-        x = np.ascontiguousarray(x, dtype=np.float32)
-        y = np.ascontiguousarray(y, dtype=np.float32)
-
-        slice_cap = min(x.shape[1], y.shape[1])
+        x = _as_2d_float32(x)
+        y = _as_2d_float32(y)
         x, y = _cca_subsample_columns(x, y, self.max_columns, self.column_subsample_seed)
+        slice_cap = min(x.shape[1], y.shape[1])
 
         x = self._center_data(x)
         y = self._center_data(y)
@@ -73,6 +169,40 @@ class CCA:
 
         try:
             # Singular values only: avoids O(min^3) work to build full U,V (LAPACK path).
+            correlations = np.linalg.svd(qx.T @ qy, compute_uv=False)
+            correlations = np.clip(correlations, 0, 1)
+            correlations = correlations[:slice_cap]
+            mean_correlation = float(np.mean(correlations)) if correlations.size > 0 else 0.0
+        except np.linalg.LinAlgError:
+            correlations = np.zeros(slice_cap)
+            mean_correlation = 0.0
+
+        if return_correlations:
+            return mean_correlation, correlations
+        return mean_correlation
+
+    def prepare_reference(self, y: Union[np.ndarray, torch.Tensor]) -> Dict[str, np.ndarray | int]:
+        y_arr = _as_2d_float32(y)
+        y_arr = _subsample_columns_for_x_only(y_arr, self.max_columns, self.column_subsample_seed + 7919)
+        y_centered = self._center_data(y_arr)
+        qy, _ = np.linalg.qr(y_centered, mode="reduced")
+        return {"qy": qy, "n_cols": int(y_arr.shape[1])}
+
+    def compute_similarity_to_prepared_reference(
+        self,
+        x: Union[np.ndarray, torch.Tensor],
+        prepared_reference: Dict[str, np.ndarray | int],
+        return_correlations: bool = False,
+    ) -> Union[float, tuple]:
+        x_arr = _as_2d_float32(x)
+        x_arr = _subsample_columns_for_x_only(x_arr, self.max_columns, self.column_subsample_seed)
+        slice_cap = min(int(x_arr.shape[1]), int(prepared_reference["n_cols"]))
+
+        x_arr = self._center_data(x_arr)
+        qx, _ = np.linalg.qr(x_arr, mode="reduced")
+        qy = prepared_reference["qy"]
+
+        try:
             correlations = np.linalg.svd(qx.T @ qy, compute_uv=False)
             correlations = np.clip(correlations, 0, 1)
             correlations = correlations[:slice_cap]
@@ -132,15 +262,8 @@ class CKA:
         return np.exp(-sq_dists / (2 * sigma))
 
     def compute_similarity(self, x: Union[np.ndarray, torch.Tensor], y: Union[np.ndarray, torch.Tensor]) -> float:
-        if isinstance(x, torch.Tensor):
-            x = x.detach().cpu().numpy()
-        if isinstance(y, torch.Tensor):
-            y = y.detach().cpu().numpy()
-
-        if x.ndim > 2:
-            x = x.reshape(x.shape[0], -1)
-        if y.ndim > 2:
-            y = y.reshape(y.shape[0], -1)
+        x = _as_2d_float32(x)
+        y = _as_2d_float32(y)
 
         if self.kernel == "linear":
             return linear_cka_doubly_centered_gram(x, y)
@@ -152,6 +275,27 @@ class CKA:
         hsic = np.sum(k * l)
         normalization = np.sqrt(np.sum(k * k) * np.sum(l * l))
         return float(hsic / normalization) if normalization > 0 else 0.0
+
+    def prepare_linear_reference(self, y: Union[np.ndarray, torch.Tensor]) -> Dict[str, np.ndarray | float]:
+        y_arr = _as_2d_float32(y)
+        yc = y_arr - y_arr.mean(axis=0, keepdims=True)
+        y_cov = yc.T @ yc
+        y_cov_fro = float(np.linalg.norm(y_cov, ord="fro"))
+        return {"yc": yc, "y_cov_fro": y_cov_fro}
+
+    def compute_similarity_linear_to_prepared_reference(
+        self,
+        x: Union[np.ndarray, torch.Tensor],
+        prepared_reference: Dict[str, np.ndarray | float],
+    ) -> float:
+        x_arr = _as_2d_float32(x)
+        xc = x_arr - x_arr.mean(axis=0, keepdims=True)
+        yc = prepared_reference["yc"]
+        cross = xc.T @ yc
+        num = float(np.sum(cross * cross))
+        x_cov = xc.T @ xc
+        den = float(np.linalg.norm(x_cov, ord="fro") * float(prepared_reference["y_cov_fro"]))
+        return num / den if den > 0.0 else 0.0
 
 
 class EuclideanDistance:
@@ -282,9 +426,12 @@ def collect_model_activations(
         def hook(_module, _inputs, output):
             if isinstance(output, (tuple, list)):
                 output = output[0]
-            out = output.detach().cpu()
+            # Reduce spatial dimensions on-device before host transfer to avoid
+            # copying large N x C x H x W tensors over PCIe each batch.
+            out = output.detach()
             if out.ndim > 2:
                 out = out.mean(dim=tuple(range(2, out.ndim)))
+            out = out.cpu()
             acts[layer_name].append(out)
 
         return hook
@@ -331,25 +478,90 @@ def evaluate_pair_rows(
 ) -> List[dict]:
     metrics = metrics or build_default_metrics()
     layer_list = list(layers)
-    idx: Optional[np.ndarray] = None
-    if max_activation_samples is not None and layer_list:
-        n = int(acts_a[layer_list[0]].shape[0])
-        if n > max_activation_samples:
-            rng = np.random.RandomState(subsample_seed)
-            idx = rng.choice(n, size=max_activation_samples, replace=False)
+    need_norm = _needs_row_normalized(metrics)
+    need_prob = _needs_probability_rows(metrics)
+
+    idx_a = _build_activation_index(acts_a, layer_list, max_activation_samples, subsample_seed)
+    idx_b = _build_activation_index(acts_b, layer_list, max_activation_samples, subsample_seed)
 
     rows = []
     for layer in layer_list:
-        x = acts_a[layer]
-        y = acts_b[layer]
+        x_prepared = _prepare_layer_array(acts_a[layer], idx=idx_a, need_norm=need_norm, need_prob=need_prob)
+        y_prepared = _prepare_layer_array(acts_b[layer], idx=idx_b, need_norm=need_norm, need_prob=need_prob)
+        x = x_prepared["raw"]
+        y = y_prepared["raw"]
         if x.shape[0] != y.shape[0]:
             raise ValueError(f"Layer {layer}: mismatched sample counts {x.shape[0]} vs {y.shape[0]}")
-        if idx is not None:
-            x = x[idx]
-            y = y[idx]
         row = {"layer": layer, "n_samples": int(x.shape[0]), "n_features": int(x.shape[1])}
         for metric_name, metric in metrics.items():
-            row[metric_name] = float(metric.compute_similarity(x, y))
+            if metric_name == "cosine":
+                row[metric_name] = float(
+                    np.mean(np.sum(x_prepared["row_norm"] * y_prepared["row_norm"], axis=1))
+                )
+            elif metric_name == "euclidean":
+                row[metric_name] = float(
+                    np.mean(np.linalg.norm(x_prepared["row_norm"] - y_prepared["row_norm"], axis=1))
+                )
+            elif metric_name == "kl_sym":
+                row[metric_name] = _mean_symmetric_kl(x_prepared["prob"], y_prepared["prob"])
+            else:
+                row[metric_name] = float(metric.compute_similarity(x, y))
+        rows.append(row)
+    return rows
+
+
+def evaluate_pair_rows_prepared(
+    prepared_acts_a: Dict[str, Dict[str, object]],
+    prepared_acts_b: Dict[str, Dict[str, object]],
+    layers: Iterable[str] = DEFAULT_LAYER_NAMES,
+    metrics: Optional[Dict[str, object]] = None,
+) -> List[dict]:
+    """Evaluate similarity using precomputed activation transforms for both sides."""
+    metrics = metrics or build_default_metrics()
+    layer_list = list(layers)
+    rows = []
+    for layer in layer_list:
+        x_prepared = prepared_acts_a[layer]
+        y_prepared = prepared_acts_b[layer]
+        x = x_prepared["raw"]
+        y = y_prepared["raw"]
+        if x.shape[0] != y.shape[0]:
+            raise ValueError(f"Layer {layer}: mismatched sample counts {x.shape[0]} vs {y.shape[0]}")
+        row = {"layer": layer, "n_samples": int(x.shape[0]), "n_features": int(x.shape[1])}
+        for metric_name, metric in metrics.items():
+            if metric_name == "cosine":
+                row[metric_name] = float(np.mean(np.sum(x_prepared["row_norm"] * y_prepared["row_norm"], axis=1)))
+            elif metric_name == "euclidean":
+                row[metric_name] = float(np.mean(np.linalg.norm(x_prepared["row_norm"] - y_prepared["row_norm"], axis=1)))
+            elif metric_name == "kl_sym":
+                row[metric_name] = _mean_symmetric_kl(x_prepared["prob"], y_prepared["prob"])
+            elif (
+                metric_name == "cca"
+                and isinstance(metric, CCA)
+                and "metric_reference_cache" in y_prepared
+                and "cca" in y_prepared["metric_reference_cache"]
+            ):
+                row[metric_name] = float(
+                    metric.compute_similarity_to_prepared_reference(
+                        x,
+                        y_prepared["metric_reference_cache"]["cca"],
+                    )
+                )
+            elif (
+                metric_name == "cka_linear"
+                and isinstance(metric, CKA)
+                and metric.kernel == "linear"
+                and "metric_reference_cache" in y_prepared
+                and "cka_linear" in y_prepared["metric_reference_cache"]
+            ):
+                row[metric_name] = float(
+                    metric.compute_similarity_linear_to_prepared_reference(
+                        x,
+                        y_prepared["metric_reference_cache"]["cka_linear"],
+                    )
+                )
+            else:
+                row[metric_name] = float(metric.compute_similarity(x, y))
         rows.append(row)
     return rows
 

@@ -38,7 +38,8 @@ from .similarity import (
     LOWER_BETTER_METRICS,
     build_default_metrics,
     collect_model_activations,
-    evaluate_pair_rows,
+    evaluate_pair_rows_prepared,
+    prepare_activations_for_evaluation,
     transform_rows_for_plot,
 )
 from .training import build_amp_config, configure_runtime
@@ -319,13 +320,27 @@ def run_notebook_trajectory_experiment(
             max_activation_samples=trajectory_config.max_activation_samples,
             activation_subsample_seed=trajectory_config.activation_subsample_seed,
         ),
-        pair_evaluator=lambda acts_a, acts_b, _similarity_log_prefix=None: evaluate_pair_rows(
-            acts_a,
-            acts_b,
+        reference_activation_preparer=lambda acts: prepare_activations_for_evaluation(
+            acts,
             layers=similarity_setup.layer_names,
             metrics=similarity_setup.metrics,
-            max_activation_samples=trajectory_config.max_activation_samples,
+            max_activation_samples=None,
             subsample_seed=trajectory_config.activation_subsample_seed,
+            precompute_metric_reference_cache=True,
+        ),
+        snapshot_activation_preparer=lambda acts: prepare_activations_for_evaluation(
+            acts,
+            layers=similarity_setup.layer_names,
+            metrics=similarity_setup.metrics,
+            max_activation_samples=None,
+            subsample_seed=trajectory_config.activation_subsample_seed,
+            precompute_metric_reference_cache=False,
+        ),
+        pair_evaluator=lambda prepared_acts_a, prepared_reference_acts, _similarity_log_prefix=None: evaluate_pair_rows_prepared(
+            prepared_acts_a,
+            prepared_reference_acts,
+            layers=similarity_setup.layer_names,
+            metrics=similarity_setup.metrics,
         ),
         transform_rows_for_plot=lambda rows: transform_rows_for_plot(
             rows, lower_better_metrics=similarity_setup.lower_better_metrics
@@ -447,6 +462,7 @@ def run_and_display_notebook_trajectory_pipeline(
             display(IPyImage(filename=similarity_artifact.evolving_bar_plot_path))
             display(IPyImage(filename=similarity_artifact.grouped_evolving_bar_plot_path))
 
+    print(f"Saved trajectory timing CSV to {trajectory_artifacts.timing_csv_path}")
     return trajectory_artifacts, trajectory_wandb_run
 
 

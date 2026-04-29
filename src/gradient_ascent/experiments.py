@@ -30,7 +30,7 @@ from .reporting import (
     save_unlearning_runtime_bar_plot,
 )
 from .trajectories import (
-    compute_epoch_rows_from_snapshots,
+    compute_epoch_rows_from_snapshots_multi_reference,
     save_combined_similarity_mia_plot,
     save_similarity_evolving_bar_plot,
     save_similarity_evolving_grouped_bar_plot,
@@ -115,6 +115,8 @@ class TrajectoryExperimentConfig:
     max_activation_samples: Optional[int] = 1024
     activation_subsample_seed: int = 42
     log_similarity_progress: bool = True
+    cache_similarity_activations: bool = True
+    similarity_activation_cache_subdir: str = "similarity_activation_cache"
     cca_max_columns: Optional[int] = 512
     cca_column_subsample_seed: int = 43
     mia_seed: int = 1337
@@ -140,6 +142,8 @@ class TrajectoryExperimentArtifacts:
     similarity_artifacts: Dict[str, Dict[str, SimilarityArtifact]]
     mia_artifacts: Dict[str, MIAArtifact]
     mia_baseline_csv_path: str
+    timing_csv_path: str
+    timing_seconds: Dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -569,10 +573,13 @@ def run_trajectory_analysis(
     activation_collector: Callable[[torch.nn.Module, object], Dict[str, object]],
     pair_evaluator: Callable[[Dict[str, object], Dict[str, object], Optional[str]], list[dict]],
     transform_rows_for_plot: Callable[[list[dict]], list[dict]],
+    reference_activation_preparer: Optional[Callable[[Dict[str, object]], Dict[str, object]]] = None,
+    snapshot_activation_preparer: Optional[Callable[[Dict[str, object]], Dict[str, object]]] = None,
     wandb_run=None,
     wandb_module=None,
 ) -> TrajectoryExperimentArtifacts:
     overall_t0 = time.perf_counter()
+    stage_timing_seconds: Dict[str, float] = {}
     print("[Trajectory] Starting trajectory analysis pipeline...")
     for path in [original_checkpoint_path, retrained_checkpoint_path]:
         if not os.path.exists(path):
@@ -580,9 +587,10 @@ def run_trajectory_analysis(
 
     t0 = time.perf_counter()
     testloader = make_loader(testset, config.trajectory_batch_size, False, num_workers, use_cuda)
+    stage_timing_seconds["build_test_loader"] = time.perf_counter() - t0
     print(
         "[Trajectory] Built test loader "
-        f"(batch_size={config.trajectory_batch_size}) in {time.perf_counter() - t0:.1f}s"
+        f"(batch_size={config.trajectory_batch_size}) in {stage_timing_seconds['build_test_loader']:.1f}s"
     )
 
     t0 = time.perf_counter()
@@ -590,19 +598,34 @@ def run_trajectory_analysis(
     retrained_model.load_state_dict(torch.load(retrained_checkpoint_path, map_location=device))
     retrained_model.eval()
     retrained_acts = activation_collector(retrained_model, testloader)
-    print(f"[Trajectory] Collected retrained reference activations in {time.perf_counter() - t0:.1f}s")
+    stage_timing_seconds["collect_retrained_reference_activations"] = time.perf_counter() - t0
+    print(
+        "[Trajectory] Collected retrained reference activations in "
+        f"{stage_timing_seconds['collect_retrained_reference_activations']:.1f}s"
+    )
 
     t0 = time.perf_counter()
     original_model = model_factory()
     original_model.load_state_dict(torch.load(original_checkpoint_path, map_location=device))
     original_model.eval()
     original_acts = activation_collector(original_model, testloader)
-    print(f"[Trajectory] Collected original reference activations in {time.perf_counter() - t0:.1f}s")
+    stage_timing_seconds["collect_original_reference_activations"] = time.perf_counter() - t0
+    print(
+        "[Trajectory] Collected original reference activations in "
+        f"{stage_timing_seconds['collect_original_reference_activations']:.1f}s"
+    )
 
     reference_map = {
         "retrained": retrained_acts,
         "original": original_acts,
     }
+    if reference_activation_preparer is not None:
+        prep_t0 = time.perf_counter()
+        reference_map = {
+            reference_key: reference_activation_preparer(reference_acts)
+            for reference_key, reference_acts in reference_map.items()
+        }
+        stage_timing_seconds["prepare_reference_activations"] = time.perf_counter() - prep_t0
 
     similarity_artifacts: Dict[str, Dict[str, SimilarityArtifact]] = {}
     metric_names = list(metric_names)
@@ -611,23 +634,34 @@ def run_trajectory_analysis(
         algo_t0 = time.perf_counter()
         print(f"[Trajectory] Similarity stage for {algorithm_key.upper()}...")
         similarity_artifacts[algorithm_key] = {}
-        for reference_key, reference_acts in reference_map.items():
-            ref_t0 = time.perf_counter()
-            print(f"[Trajectory]   {algorithm_key.upper()} vs {reference_key.capitalize()} starting...")
-            similarity_log_prefix = (
+        similarity_log_prefix_map = {
+            reference_key: (
                 f"[Similarity {algorithm_key.upper()} vs {reference_key.capitalize()}]"
                 if config.log_similarity_progress
                 else None
             )
-            epoch_rows = compute_epoch_rows_from_snapshots(
-                snapshot_dir,
-                model_factory,
-                reference_acts,
-                lambda model: activation_collector(model, testloader),
-                pair_evaluator,
-                device,
-                similarity_log_prefix=similarity_log_prefix,
-            )
+            for reference_key in reference_map
+        }
+        epoch_rows_map = compute_epoch_rows_from_snapshots_multi_reference(
+            snapshot_dir,
+            model_factory,
+            reference_map,
+            lambda model: activation_collector(model, testloader),
+            pair_evaluator,
+            device,
+            similarity_log_prefix_map=similarity_log_prefix_map,
+            activation_cache_dir=(
+                os.path.join(config.out_dir, config.similarity_activation_cache_subdir, algorithm_key)
+                if config.cache_similarity_activations
+                else None
+            ),
+            activation_preparer=snapshot_activation_preparer or reference_activation_preparer,
+        )
+
+        for reference_key in reference_map:
+            ref_t0 = time.perf_counter()
+            print(f"[Trajectory]   {algorithm_key.upper()} vs {reference_key.capitalize()} starting...")
+            epoch_rows = epoch_rows_map[reference_key]
             csv_path = f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}.csv"
             summary_plot_path = (
                 f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_summary.png"
@@ -694,9 +728,11 @@ def run_trajectory_analysis(
                 f"[Trajectory]   {algorithm_key.upper()} vs {reference_key.capitalize()} done "
                 f"in {time.perf_counter() - ref_t0:.1f}s"
             )
+            stage_timing_seconds[f"similarity_{algorithm_key}_vs_{reference_key}"] = time.perf_counter() - ref_t0
+        stage_timing_seconds[f"similarity_{algorithm_key}_total"] = time.perf_counter() - algo_t0
         print(
             f"[Trajectory] Similarity stage for {algorithm_key.upper()} finished "
-            f"in {time.perf_counter() - algo_t0:.1f}s"
+            f"in {stage_timing_seconds[f'similarity_{algorithm_key}_total']:.1f}s"
         )
 
     t0 = time.perf_counter()
@@ -735,7 +771,11 @@ def run_trajectory_analysis(
         f"MIA probes ready | forget(frog={config.target_label}): {forget_n} member + {forget_n} non-member | "
         f"retain(label={config.retain_control_label}): {retain_n} member + {retain_n} non-member"
     )
-    print(f"[Trajectory] Prepared MIA subsets/loaders in {time.perf_counter() - t0:.1f}s")
+    stage_timing_seconds["prepare_mia_subsets_and_loaders"] = time.perf_counter() - t0
+    print(
+        "[Trajectory] Prepared MIA subsets/loaders in "
+        f"{stage_timing_seconds['prepare_mia_subsets_and_loaders']:.1f}s"
+    )
 
     t0 = time.perf_counter()
     retrained_mia_model = model_factory()
@@ -761,7 +801,11 @@ def run_trajectory_analysis(
                 )
             }
         )
-    print(f"[Trajectory] Computed/logged retrained MIA baseline in {time.perf_counter() - t0:.1f}s")
+    stage_timing_seconds["compute_retrained_mia_baseline"] = time.perf_counter() - t0
+    print(
+        "[Trajectory] Computed/logged retrained MIA baseline in "
+        f"{stage_timing_seconds['compute_retrained_mia_baseline']:.1f}s"
+    )
 
     mia_panel_metrics = [
         ("forget_loss_auc", "Loss-threshold AUC (lower = less inferable)"),
@@ -815,12 +859,32 @@ def run_trajectory_analysis(
             f"[Trajectory] MIA trajectory for {algorithm_key.upper()} finished "
             f"in {time.perf_counter() - mia_t0:.1f}s"
         )
+        stage_timing_seconds[f"mia_{algorithm_key}_total"] = time.perf_counter() - mia_t0
 
-    print(f"[Trajectory] Full trajectory analysis completed in {time.perf_counter() - overall_t0:.1f}s")
+    stage_timing_seconds["trajectory_total"] = time.perf_counter() - overall_t0
+    timing_csv_path = f"{config.out_dir}/trajectory_timing_seconds.csv"
+    with open(timing_csv_path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["stage", "seconds"])
+        writer.writeheader()
+        for stage_name, seconds in sorted(stage_timing_seconds.items()):
+            writer.writerow({"stage": stage_name, "seconds": float(seconds)})
+    if wandb_run is not None and wandb_module is not None:
+        wandb_run.log(
+            {
+                "tables/trajectory_timing_seconds": wandb_module.Table(
+                    data=[[stage, float(seconds)] for stage, seconds in sorted(stage_timing_seconds.items())],
+                    columns=["stage", "seconds"],
+                )
+            }
+        )
+    print(f"[Trajectory] Full trajectory analysis completed in {stage_timing_seconds['trajectory_total']:.1f}s")
+    print(f"[Trajectory] Saved timing CSV to {timing_csv_path}")
     return TrajectoryExperimentArtifacts(
         similarity_artifacts=similarity_artifacts,
         mia_artifacts=mia_artifacts,
         mia_baseline_csv_path=mia_baseline_csv_path,
+        timing_csv_path=timing_csv_path,
+        timing_seconds={key: float(value) for key, value in stage_timing_seconds.items()},
     )
 
 
