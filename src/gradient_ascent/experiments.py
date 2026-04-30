@@ -39,6 +39,7 @@ from .reporting import (
 )
 from .trajectories import (
     compute_epoch_rows_from_snapshots_multi_reference,
+    save_similarity_before_after_grouped_bar_plot,
     save_combined_similarity_mia_plot,
     save_similarity_metric_timing_plot,
     save_similarity_evolving_bar_plot,
@@ -145,6 +146,7 @@ class SimilarityArtifact:
     summary_plot_path: str
     evolving_bar_plot_path: str
     grouped_evolving_bar_plot_path: str
+    before_after_grouped_plot_path: str
 
 
 @dataclass(frozen=True)
@@ -701,6 +703,10 @@ def run_trajectory_analysis(
                 f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}"
                 "_evolving_grouped_bars.gif"
             )
+            before_after_grouped_plot_path = (
+                f"{config.out_dir}/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}"
+                "_before_after_grouped_bars.png"
+            )
 
             save_similarity_trajectory_csv(epoch_rows, csv_path, metric_names)
             save_metric_summary_plot(
@@ -728,6 +734,15 @@ def run_trajectory_analysis(
                 metric_names,
                 lower_better_metrics,
             )
+            save_similarity_before_after_grouped_bar_plot(
+                epoch_rows,
+                before_after_grouped_plot_path,
+                algorithm_key,
+                reference_key,
+                layer_names,
+                metric_names,
+                lower_better_metrics,
+            )
             _log_media(
                 wandb_run,
                 wandb_module,
@@ -746,11 +761,18 @@ def run_trajectory_analysis(
                 f"plots/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_evolving_grouped_bars",
                 grouped_evolving_bar_plot_path,
             )
+            _log_media(
+                wandb_run,
+                wandb_module,
+                f"plots/similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}_before_after_grouped_bars",
+                before_after_grouped_plot_path,
+            )
             similarity_artifacts[algorithm_key][reference_key] = SimilarityArtifact(
                 csv_path=csv_path,
                 summary_plot_path=summary_plot_path,
                 evolving_bar_plot_path=evolving_bar_plot_path,
                 grouped_evolving_bar_plot_path=grouped_evolving_bar_plot_path,
+                before_after_grouped_plot_path=before_after_grouped_plot_path,
             )
             ref_elapsed = time.perf_counter() - ref_t0
             print(

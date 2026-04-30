@@ -589,6 +589,7 @@ def run_and_display_notebook_trajectory_pipeline(
                 with gif_out:
                     clear_output(wait=True)
                     if not bool(hide_gifs_checkbox.value):
+                        display(IPyImage(filename=similarity_artifact.before_after_grouped_plot_path))
                         display(IPyImage(filename=similarity_artifact.evolving_bar_plot_path))
                         display(IPyImage(filename=similarity_artifact.grouped_evolving_bar_plot_path))
 

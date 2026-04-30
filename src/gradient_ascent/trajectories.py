@@ -5,6 +5,7 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import PillowWriter
+from matplotlib.lines import Line2D
 import numpy as np
 import torch
 
@@ -246,6 +247,106 @@ def save_similarity_evolving_grouped_bar_plot(
             ax.legend(title="Layer", ncol=2, fontsize="small")
             writer.grab_frame()
 
+    plt.close(fig)
+    return out_path
+
+
+def save_similarity_before_after_grouped_bar_plot(
+    epoch_rows: EpochRows,
+    out_path: str,
+    algorithm_key: str,
+    reference_key: str,
+    layer_names: Iterable[str],
+    metric_names: Iterable[str],
+    lower_better_metrics: Iterable[str],
+) -> str:
+    """Save a static grouped bar chart comparing first vs last unlearning step.
+
+    Layout is:
+      - 5 metric groups on x-axis (or len(metric_names) in general),
+      - each metric group contains two subgroups: "Before" and "After",
+      - each subgroup contains one bar per layer.
+    """
+    metric_names = list(metric_names)
+    layer_names = list(layer_names)
+    oriented_rows = orient_epoch_rows_for_similarity(epoch_rows, metric_names, lower_better_metrics)
+    if not oriented_rows:
+        raise RuntimeError("Cannot create before/after grouped bar plot: epoch_rows is empty.")
+
+    before_epoch, before_rows = oriented_rows[0]
+    after_epoch, after_rows = oriented_rows[-1]
+    layer_to_idx = {layer_name: idx for idx, layer_name in enumerate(layer_names)}
+
+    def _rows_to_matrix(rows: List[dict]) -> np.ndarray:
+        matrix = np.zeros((len(layer_names), len(metric_names)), dtype=np.float64)
+        for row in rows:
+            layer = row["layer"]
+            if layer not in layer_to_idx:
+                continue
+            layer_idx = layer_to_idx[layer]
+            for metric_idx, metric_name in enumerate(metric_names):
+                matrix[layer_idx, metric_idx] = float(row[metric_name])
+        return matrix
+
+    before_matrix = _rows_to_matrix(before_rows)
+    after_matrix = _rows_to_matrix(after_rows)
+
+    x_positions = np.arange(len(metric_names), dtype=np.float64)
+    n_layers = max(len(layer_names), 1)
+    subgroup_sep = 0.42
+    subgroup_width = 0.36
+    bar_width = subgroup_width / n_layers
+    before_centers = x_positions - subgroup_sep / 2.0
+    after_centers = x_positions + subgroup_sep / 2.0
+    color_map = plt.cm.get_cmap("tab10", n_layers)
+
+    fig, ax = plt.subplots(1, 1, figsize=(16, 6), constrained_layout=True)
+    for layer_idx, layer_name in enumerate(layer_names):
+        layer_offset = -subgroup_width / 2.0 + (layer_idx + 0.5) * bar_width
+        ax.bar(
+            before_centers + layer_offset,
+            before_matrix[layer_idx],
+            width=bar_width * 0.95,
+            color=color_map(layer_idx),
+        )
+        ax.bar(
+            after_centers + layer_offset,
+            after_matrix[layer_idx],
+            width=bar_width * 0.95,
+            color=color_map(layer_idx),
+        )
+
+    # Layer legend uses proxy artists so we can keep one clean legend block.
+    layer_handles = [
+        plt.Rectangle((0, 0), 1, 1, color=color_map(layer_idx), label=layer_name)
+        for layer_idx, layer_name in enumerate(layer_names)
+    ]
+    stage_handles = [
+        Line2D([0], [0], color="black", linewidth=0, marker="s", markersize=8, label="Before"),
+        Line2D([0], [0], color="black", linewidth=0, marker="o", markersize=8, label="After"),
+    ]
+
+    ax.set_title(
+        f"{algorithm_key.upper()} vs {reference_key.capitalize()} | "
+        f"Before/After grouped by metric (before={before_epoch}, after={after_epoch})"
+    )
+    ax.set_xlabel("Similarity metric")
+    ax.set_ylabel("Similarity to reference")
+    ax.set_ylim(0.0, 1.02)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(metric_names, rotation=20, ha="right")
+    ax.grid(axis="y", alpha=0.3)
+
+    # Add subgroup labels under each metric group.
+    for metric_idx in range(len(metric_names)):
+        ax.text(before_centers[metric_idx], -0.06, "Before", ha="center", va="top", fontsize=9)
+        ax.text(after_centers[metric_idx], -0.06, "After", ha="center", va="top", fontsize=9)
+
+    first_legend = ax.legend(handles=layer_handles, title="Layer", ncol=2, fontsize="small", loc="upper left")
+    ax.add_artist(first_legend)
+    ax.legend(handles=stage_handles, title="Snapshot", loc="upper right", fontsize="small")
+
+    fig.savefig(out_path, dpi=180)
     plt.close(fig)
     return out_path
 
