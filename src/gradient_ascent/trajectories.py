@@ -5,7 +5,6 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import PillowWriter
-from matplotlib.lines import Line2D
 import numpy as np
 import torch
 
@@ -321,11 +320,6 @@ def save_similarity_before_after_grouped_bar_plot(
         plt.Rectangle((0, 0), 1, 1, color=color_map(layer_idx), label=layer_name)
         for layer_idx, layer_name in enumerate(layer_names)
     ]
-    stage_handles = [
-        Line2D([0], [0], color="black", linewidth=0, marker="s", markersize=8, label="Before"),
-        Line2D([0], [0], color="black", linewidth=0, marker="o", markersize=8, label="After"),
-    ]
-
     ax.set_title(
         f"{algorithm_key.upper()} vs {reference_key.capitalize()} | "
         f"Before/After grouped by metric (before={before_epoch}, after={after_epoch})"
@@ -334,17 +328,16 @@ def save_similarity_before_after_grouped_bar_plot(
     ax.set_ylabel("Similarity to reference")
     ax.set_ylim(0.0, 1.02)
     ax.set_xticks(x_positions)
-    ax.set_xticklabels(metric_names, rotation=20, ha="right")
+    ax.set_xticklabels(metric_names, rotation=0, ha="center")
     ax.grid(axis="y", alpha=0.3)
 
-    # Add subgroup labels under each metric group.
+    # Add subgroup labels as a separate lower text row so they do not overlap
+    # with metric names.
     for metric_idx in range(len(metric_names)):
-        ax.text(before_centers[metric_idx], -0.06, "Before", ha="center", va="top", fontsize=9)
-        ax.text(after_centers[metric_idx], -0.06, "After", ha="center", va="top", fontsize=9)
+        ax.text(before_centers[metric_idx], -0.045, "Before", ha="center", va="top", fontsize=9)
+        ax.text(after_centers[metric_idx], -0.045, "After", ha="center", va="top", fontsize=9)
 
-    first_legend = ax.legend(handles=layer_handles, title="Layer", ncol=2, fontsize="small", loc="upper left")
-    ax.add_artist(first_legend)
-    ax.legend(handles=stage_handles, title="Snapshot", loc="upper right", fontsize="small")
+    ax.legend(handles=layer_handles, title="Layer", ncol=2, fontsize="small", loc="upper left")
 
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
