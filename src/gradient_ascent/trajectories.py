@@ -324,7 +324,7 @@ def save_similarity_before_after_grouped_bar_plot(
         f"{algorithm_key.upper()} vs {reference_key.capitalize()} | "
         f"Before/After grouped by metric (before={before_epoch}, after={after_epoch})"
     )
-    ax.set_xlabel("Similarity metric")
+    ax.set_xlabel("Similarity metric", labelpad=28)
     ax.set_ylabel("Similarity to reference")
     ax.set_ylim(0.0, 1.02)
     ax.set_xticks(x_positions)
@@ -334,8 +334,8 @@ def save_similarity_before_after_grouped_bar_plot(
     # Add subgroup labels as a separate lower text row so they do not overlap
     # with metric names.
     for metric_idx in range(len(metric_names)):
-        ax.text(before_centers[metric_idx], -0.045, "Before", ha="center", va="top", fontsize=9)
-        ax.text(after_centers[metric_idx], -0.045, "After", ha="center", va="top", fontsize=9)
+        ax.text(before_centers[metric_idx], -0.022, "Before", ha="center", va="top", fontsize=9)
+        ax.text(after_centers[metric_idx], -0.022, "After", ha="center", va="top", fontsize=9)
 
     ax.legend(handles=layer_handles, title="Layer", ncol=2, fontsize="small", loc="upper left")
 
