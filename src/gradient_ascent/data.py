@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 import os
+import time
 from typing import Tuple
+from urllib.error import HTTPError, URLError
 
 import numpy as np
 import torchvision
@@ -42,20 +44,60 @@ def cifar10_transform(train: bool = False) -> transforms.Compose:
     )
 
 
-def load_cifar10_datasets(root: str = "./data") -> Tuple[Dataset, Dataset]:
-    trainset = torchvision.datasets.CIFAR10(
-        root=root,
-        train=True,
-        download=True,
-        transform=cifar10_transform(train=True),
+def load_cifar10_datasets(
+    root: str = "./data",
+    *,
+    download: bool = True,
+    download_retries: int = 6,
+    download_retry_initial_delay_sec: float = 3.0,
+    download_retry_max_delay_sec: float = 120.0,
+) -> Tuple[Dataset, Dataset]:
+    """Load CIFAR-10 train/test sets.
+
+    When ``download=True``, the first run may fetch archives from the network.
+    Transient failures (HTTP 503, timeouts, etc.) are retried with exponential backoff.
+    """
+    retryable = (HTTPError, URLError, TimeoutError, ConnectionError)
+    last_exc: BaseException | None = None
+    for attempt in range(max(1, download_retries)):
+        try:
+            trainset = torchvision.datasets.CIFAR10(
+                root=root,
+                train=True,
+                download=download,
+                transform=cifar10_transform(train=True),
+            )
+            testset = torchvision.datasets.CIFAR10(
+                root=root,
+                train=False,
+                download=download,
+                transform=cifar10_transform(train=False),
+            )
+            return trainset, testset
+        except retryable as exc:
+            last_exc = exc
+            if attempt >= download_retries - 1 or not download:
+                break
+            delay = min(
+                download_retry_max_delay_sec,
+                download_retry_initial_delay_sec * (2**attempt),
+            )
+            print(
+                "[gradient_ascent] CIFAR-10 download/load failed "
+                f"({type(exc).__name__}: {exc}); retrying in {delay:.0f}s "
+                f"(attempt {attempt + 1}/{download_retries})...",
+                flush=True,
+            )
+            time.sleep(delay)
+
+    assert last_exc is not None
+    hint = (
+        " The CIFAR-10 mirror sometimes returns HTTP 503; wait and retry, or place a local "
+        f"copy under {root!r} (folder cifar-10-batches-py/) and call with download=False."
     )
-    testset = torchvision.datasets.CIFAR10(
-        root=root,
-        train=False,
-        download=True,
-        transform=cifar10_transform(train=False),
-    )
-    return trainset, testset
+    raise RuntimeError(
+        f"Could not download or load CIFAR-10 after {download_retries} attempt(s).{hint}"
+    ) from last_exc
 
 
 def clone_dataset_with_eval_transform(dataset: Dataset) -> Dataset:

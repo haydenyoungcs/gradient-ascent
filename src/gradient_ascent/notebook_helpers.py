@@ -605,13 +605,19 @@ def prepare_notebook_runtime(
     out_dir: str = "out",
     model_depth: int = 50,
     data_root: str = "./data",
+    cifar10_download: bool = True,
+    cifar10_download_retries: int = 6,
 ) -> NotebookRuntime:
     configure_runtime()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_config = build_amp_config(device)
     use_bf16 = amp_config.dtype == torch.bfloat16
 
-    trainset, testset = load_cifar10_datasets(root=data_root)
+    trainset, testset = load_cifar10_datasets(
+        data_root,
+        download=cifar10_download,
+        download_retries=cifar10_download_retries,
+    )
     use_cuda = device.type == "cuda"
     num_workers = default_num_workers(use_cuda)
     model_factory = lambda: Net(num_classes=num_classes, pretrained=False, model_depth=model_depth).to(device)
