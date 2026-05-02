@@ -8,7 +8,7 @@ The archive is identified by an MD5 checksum (`c58f30108f718f92721af3b95e74349a`
 
 ## What the project does
 
-`load_cifar10_datasets` in `src/gradient_ascent/data.py` tries several URLs in order: the canonical HTTPS link, the same path over plain HTTP (sometimes useful when TLS or a CDN edge fails, as discussed in the torchvision issue tracker), and a third-party directory mirror that lists the same `cifar-10-python.tar.gz` file. Between attempts it keeps the existing exponential backoff for transient errors.
+`load_cifar10_datasets` in `src/gradient_ascent/data.py` tries URLs in order (unless overridden by env): canonical Toronto (`cs.toronto.edu`), then the Brainchip dataset mirror, then the Azure ML public examples blob (same tarball as in Microsoft’s Azure ML pipeline samples). Transient failures use exponential backoff per mirror.
 
 If you host a private copy (e.g. on cloud storage), set a comma-separated list in the environment variable `GRADIENT_ASCENT_CIFAR10_URLS` so your URL is tried first—or as the only source if you provide the full ordered list you want.
 
@@ -16,5 +16,5 @@ If you host a private copy (e.g. on cloud storage), set a comma-separated list i
 
 - Alex Krizhevsky, “CIFAR-10 and CIFAR-100 datasets” — official page with version table and MD5 for the Python tarball: [https://www.cs.toronto.edu/~kriz/cifar.html](https://www.cs.toronto.edu/~kriz/cifar.html)
 - PyTorch Vision `CIFAR10` implementation (default URL, filename, `tgz_md5`): [torchvision.datasets.cifar](https://github.com/pytorch/vision/blob/main/torchvision/datasets/cifar.py)
-- PyTorch Vision issue #5039 — users report SSL or availability problems with the default URL and switch to HTTP or alternative mirrors: [github.com/pytorch/vision/issues/5039](https://github.com/pytorch/vision/issues/5039)
-- Optional mirror directory listing `cifar-10-python.tar.gz`: [data.brainchip.com dataset-mirror/cifar10](https://data.brainchip.com/dataset-mirror/cifar10/) (third-party; same filename as torchvision expects)
+- Azure ML examples pipeline downloads `cifar-10-python.tar.gz` from `azuremlexamples.blob.core.windows.net`: [azureml-examples `cli/jobs/pipelines/cifar-10/pipeline.yml`](https://github.com/Azure/azureml-examples/blob/main/cli/jobs/pipelines/cifar-10/pipeline.yml)
+- Mirror directory listing `cifar-10-python.tar.gz`: [data.brainchip.com dataset-mirror/cifar10](https://data.brainchip.com/dataset-mirror/cifar10/) (third-party)

@@ -606,7 +606,7 @@ def prepare_notebook_runtime(
     model_depth: int = 50,
     data_root: str = "./data",
     cifar10_download: bool = True,
-    cifar10_download_retries: int = 6,
+    cifar10_download_retries: int = 2,
 ) -> NotebookRuntime:
     configure_runtime()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -12,11 +12,11 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Dataset, Subset
 
 
-# Same file as torchvision.datasets.CIFAR10 (see torchvision/datasets/cifar.py); mirrors must match MD5 tgz_md5.
+# Same file as torchvision.datasets.CIFAR10 (see torchvision/datasets/cifar.py); mirrors must match tgz_md5.
 DEFAULT_CIFAR10_ARCHIVE_URLS: Tuple[str, ...] = (
     "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz",
-    "http://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz",
     "https://data.brainchip.com/dataset-mirror/cifar10/cifar-10-python.tar.gz",
+    "https://azuremlexamples.blob.core.windows.net/datasets/cifar-10-python.tar.gz",
 )
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
@@ -67,7 +67,7 @@ def load_cifar10_datasets(
     root: str = "./data",
     *,
     download: bool = True,
-    download_retries: int = 6,
+    download_retries: int = 2,
     download_retry_initial_delay_sec: float = 3.0,
     download_retry_max_delay_sec: float = 120.0,
     download_urls: Optional[Sequence[str]] = None,
@@ -77,8 +77,8 @@ def load_cifar10_datasets(
     When ``download=True``, the first run may fetch archives from the network.
     Transient failures (HTTP 503, timeouts, etc.) are retried with exponential backoff.
 
-    If the default Toronto host is down, this function tries further URLs (HTTP variant
-    and a listed mirror) that serve the same ``cifar-10-python.tar.gz`` as torchvision.
+    Default URLs: canonical Toronto, then Brainchip mirror, then Azure ML examples blob.
+    All must be the same ``cifar-10-python.tar.gz`` as torchvision.
     Override order via ``download_urls=`` or env ``GRADIENT_ASCENT_CIFAR10_URLS`` (comma-separated).
     """
     retryable = (HTTPError, URLError, TimeoutError, ConnectionError)
@@ -135,9 +135,10 @@ def load_cifar10_datasets(
 
         assert last_exc is not None
         hint = (
-            " The CIFAR-10 mirror sometimes returns HTTP 503; wait and retry, place a local "
+            " Wait and retry, place a local "
             f"copy under {root!r} (folder cifar-10-batches-py/) and call with download=False, "
-            "or set GRADIENT_ASCENT_CIFAR10_URLS to a comma-separated list of tarball URLs."
+            "or set GRADIENT_ASCENT_CIFAR10_URLS to a comma-separated list of tarball URLs "
+            "(same archive as torchvision; MD5 c58f30108f718f92721af3b95e74349a)."
         )
         raise RuntimeError(
             f"Could not download or load CIFAR-10 after {download_retries} attempt(s) "
