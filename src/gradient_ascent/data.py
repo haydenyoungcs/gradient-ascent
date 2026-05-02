@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import os
 import time
-from typing import Tuple
+from typing import Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 
 import numpy as np
@@ -11,6 +11,13 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Dataset, Subset
 
+
+# Same file as torchvision.datasets.CIFAR10 (see torchvision/datasets/cifar.py); mirrors must match MD5 tgz_md5.
+DEFAULT_CIFAR10_ARCHIVE_URLS: Tuple[str, ...] = (
+    "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz",
+    "http://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz",
+    "https://data.brainchip.com/dataset-mirror/cifar10/cifar-10-python.tar.gz",
+)
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
@@ -44,6 +51,18 @@ def cifar10_transform(train: bool = False) -> transforms.Compose:
     )
 
 
+def _resolve_cifar10_download_urls(
+    explicit: Optional[Sequence[str]],
+) -> Tuple[str, ...]:
+    """Pick download URLs: explicit argument, then env, then built-in defaults."""
+    if explicit is not None:
+        return tuple(explicit)
+    env = os.environ.get("GRADIENT_ASCENT_CIFAR10_URLS", "").strip()
+    if env:
+        return tuple(u.strip() for u in env.split(",") if u.strip())
+    return DEFAULT_CIFAR10_ARCHIVE_URLS
+
+
 def load_cifar10_datasets(
     root: str = "./data",
     *,
@@ -51,53 +70,81 @@ def load_cifar10_datasets(
     download_retries: int = 6,
     download_retry_initial_delay_sec: float = 3.0,
     download_retry_max_delay_sec: float = 120.0,
+    download_urls: Optional[Sequence[str]] = None,
 ) -> Tuple[Dataset, Dataset]:
     """Load CIFAR-10 train/test sets.
 
     When ``download=True``, the first run may fetch archives from the network.
     Transient failures (HTTP 503, timeouts, etc.) are retried with exponential backoff.
+
+    If the default Toronto host is down, this function tries further URLs (HTTP variant
+    and a listed mirror) that serve the same ``cifar-10-python.tar.gz`` as torchvision.
+    Override order via ``download_urls=`` or env ``GRADIENT_ASCENT_CIFAR10_URLS`` (comma-separated).
     """
     retryable = (HTTPError, URLError, TimeoutError, ConnectionError)
-    last_exc: BaseException | None = None
-    for attempt in range(max(1, download_retries)):
-        try:
-            trainset = torchvision.datasets.CIFAR10(
-                root=root,
-                train=True,
-                download=download,
-                transform=cifar10_transform(train=True),
-            )
-            testset = torchvision.datasets.CIFAR10(
-                root=root,
-                train=False,
-                download=download,
-                transform=cifar10_transform(train=False),
-            )
-            return trainset, testset
-        except retryable as exc:
-            last_exc = exc
-            if attempt >= download_retries - 1 or not download:
-                break
-            delay = min(
-                download_retry_max_delay_sec,
-                download_retry_initial_delay_sec * (2**attempt),
-            )
-            print(
-                "[gradient_ascent] CIFAR-10 download/load failed "
-                f"({type(exc).__name__}: {exc}); retrying in {delay:.0f}s "
-                f"(attempt {attempt + 1}/{download_retries})...",
-                flush=True,
-            )
-            time.sleep(delay)
+    urls = _resolve_cifar10_download_urls(download_urls)
 
-    assert last_exc is not None
-    hint = (
-        " The CIFAR-10 mirror sometimes returns HTTP 503; wait and retry, or place a local "
-        f"copy under {root!r} (folder cifar-10-batches-py/) and call with download=False."
-    )
-    raise RuntimeError(
-        f"Could not download or load CIFAR-10 after {download_retries} attempt(s).{hint}"
-    ) from last_exc
+    cifar_cls = torchvision.datasets.CIFAR10
+    saved_url = cifar_cls.url
+    try:
+        last_exc: BaseException | None = None
+        for mirror_idx, mirror_url in enumerate(urls):
+            cifar_cls.url = mirror_url
+            if download and len(urls) > 1:
+                print(
+                    f"[gradient_ascent] CIFAR-10 download source {mirror_idx + 1}/{len(urls)}: {mirror_url}",
+                    flush=True,
+                )
+            for attempt in range(max(1, download_retries)):
+                try:
+                    trainset = cifar_cls(
+                        root=root,
+                        train=True,
+                        download=download,
+                        transform=cifar10_transform(train=True),
+                    )
+                    testset = cifar_cls(
+                        root=root,
+                        train=False,
+                        download=download,
+                        transform=cifar10_transform(train=False),
+                    )
+                    return trainset, testset
+                except retryable as exc:
+                    last_exc = exc
+                    if attempt >= download_retries - 1 or not download:
+                        break
+                    delay = min(
+                        download_retry_max_delay_sec,
+                        download_retry_initial_delay_sec * (2**attempt),
+                    )
+                    print(
+                        "[gradient_ascent] CIFAR-10 download/load failed "
+                        f"({type(exc).__name__}: {exc}); retrying in {delay:.0f}s "
+                        f"(attempt {attempt + 1}/{download_retries})...",
+                        flush=True,
+                    )
+                    time.sleep(delay)
+
+            # This mirror exhausted retries; try next URL if any.
+            if mirror_idx < len(urls) - 1 and download:
+                print(
+                    "[gradient_ascent] Switching to next CIFAR-10 mirror after repeated failures.",
+                    flush=True,
+                )
+
+        assert last_exc is not None
+        hint = (
+            " The CIFAR-10 mirror sometimes returns HTTP 503; wait and retry, place a local "
+            f"copy under {root!r} (folder cifar-10-batches-py/) and call with download=False, "
+            "or set GRADIENT_ASCENT_CIFAR10_URLS to a comma-separated list of tarball URLs."
+        )
+        raise RuntimeError(
+            f"Could not download or load CIFAR-10 after {download_retries} attempt(s) "
+            f"per mirror ({len(urls)} source(s) tried).{hint}"
+        ) from last_exc
+    finally:
+        cifar_cls.url = saved_url
 
 
 def clone_dataset_with_eval_transform(dataset: Dataset) -> Dataset:
