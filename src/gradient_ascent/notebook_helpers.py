@@ -4,6 +4,7 @@ import csv
 import math
 import os
 import shutil
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
@@ -197,22 +198,47 @@ def _average_similarity_csvs(csv_paths: list[str]) -> list[tuple[int, list[dict]
     if any(not rows for rows in runs):
         raise RuntimeError("Cannot average similarity CSVs: at least one CSV has no rows.")
 
-    base_epochs = [int(epoch) for epoch, _rows in runs[0]]
-    for run in runs[1:]:
-        if [int(epoch) for epoch, _rows in run] != base_epochs:
-            raise RuntimeError("Similarity epoch mismatch across forget-class runs; cannot average safely.")
+    runs_by_epoch: list[dict[int, list[dict]]] = []
+    for path, run in zip(csv_paths, runs):
+        by_ep: dict[int, list[dict]] = {}
+        for epoch, body in run:
+            ep = int(epoch)
+            if ep in by_ep:
+                raise RuntimeError(f"Duplicate epoch {ep} block in similarity CSV: {path}")
+            by_ep[ep] = body
+        runs_by_epoch.append(by_ep)
+
+    common_epochs = set(runs_by_epoch[0].keys())
+    for by_ep in runs_by_epoch[1:]:
+        common_epochs &= set(by_ep.keys())
+    if not common_epochs:
+        raise RuntimeError(
+            "No epoch appears in all similarity trajectory CSVs; cannot average. "
+            f"Epoch sets (per file): {[sorted(d.keys()) for d in runs_by_epoch]}"
+        )
+
+    sorted_epochs = sorted(common_epochs)
+    max_len = max(len(d) for d in runs_by_epoch)
+    if len(sorted_epochs) < max_len:
+        warnings.warn(
+            "Similarity trajectories differ in unlearning length or epoch sets; "
+            f"averaging over the intersection only ({len(sorted_epochs)} steps, "
+            f"longest single run {max_len} steps).",
+            UserWarning,
+            stacklevel=2,
+        )
 
     averaged: list[tuple[int, list[dict]]] = []
-    for epoch_idx, epoch in enumerate(base_epochs):
-        first_rows = runs[0][epoch_idx][1]
+    for epoch in sorted_epochs:
+        first_rows = runs_by_epoch[0][epoch]
         layer_order = [str(row["layer"]) for row in first_rows]
         metric_names = [
             key for key in first_rows[0].keys() if key not in {"layer", "n_samples", "n_features"}
         ]
 
         by_run_layer: list[dict[str, dict]] = []
-        for run in runs:
-            row_map = {str(row["layer"]): row for row in run[epoch_idx][1]}
+        for by_ep in runs_by_epoch:
+            row_map = {str(row["layer"]): row for row in by_ep[epoch]}
             by_run_layer.append(row_map)
 
         epoch_rows: list[dict] = []
@@ -295,17 +321,43 @@ def _average_mia_rows_csvs(csv_paths: list[str]) -> list[dict[str, float]]:
     if not csv_paths:
         raise RuntimeError("Cannot average MIA CSVs: csv_paths is empty.")
     runs = [_load_mia_rows_from_csv(path) for path in csv_paths]
-    base_epochs = [int(row["epoch"]) for row in runs[0]]
-    for run in runs[1:]:
-        if [int(row["epoch"]) for row in run] != base_epochs:
-            raise RuntimeError("MIA epoch mismatch across forget-class runs; cannot average safely.")
+    runs_by_epoch: list[dict[int, dict[str, float]]] = []
+    for path, run in zip(csv_paths, runs):
+        by_ep: dict[int, dict[str, float]] = {}
+        for row in run:
+            ep = int(row["epoch"])
+            if ep in by_ep:
+                raise RuntimeError(f"Duplicate epoch {ep} in MIA trajectory CSV: {path}")
+            by_ep[ep] = row
+        runs_by_epoch.append(by_ep)
 
-    metric_keys = [key for key in runs[0][0].keys() if key != "epoch"]
+    common_epochs = set(runs_by_epoch[0].keys())
+    for by_ep in runs_by_epoch[1:]:
+        common_epochs &= set(by_ep.keys())
+    if not common_epochs:
+        raise RuntimeError(
+            "No epoch appears in all MIA trajectory CSVs; cannot average. "
+            f"Epoch sets (per file): {[sorted(d.keys()) for d in runs_by_epoch]}"
+        )
+
+    sorted_epochs = sorted(common_epochs)
+    max_len = max(len(d) for d in runs_by_epoch)
+    if len(sorted_epochs) < max_len:
+        warnings.warn(
+            "MIA trajectories differ in unlearning length or epoch sets; "
+            f"averaging over the intersection only ({len(sorted_epochs)} steps, "
+            f"longest single run {max_len} steps).",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    ref_row = runs_by_epoch[0][sorted_epochs[0]]
+    metric_keys = [key for key in ref_row.keys() if key != "epoch"]
     averaged: list[dict[str, float]] = []
-    for row_idx, epoch in enumerate(base_epochs):
+    for epoch in sorted_epochs:
         out_row: dict[str, float] = {"epoch": int(epoch)}
         for key in metric_keys:
-            vals = [float(run[row_idx][key]) for run in runs]
+            vals = [float(runs_by_epoch[i][epoch][key]) for i in range(len(runs_by_epoch))]
             out_row[key] = float(np.mean(np.asarray(vals, dtype=np.float64)))
         averaged.append(out_row)
     return averaged
