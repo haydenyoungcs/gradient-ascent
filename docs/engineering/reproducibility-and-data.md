@@ -1,5 +1,11 @@
 # Reproducibility and data
 
+## Colab: `ModuleNotFoundError: No module named 'gradient_ascent'`
+
+Google Colab’s working directory is often **`/content`**, not the cloned repository, so Python cannot see `src/gradient_ascent` until the repo is on `sys.path`.
+
+The **first code cell** in `notebooks/experiments.ipynb` fixes this in stdlib only: walk parents of `cwd` for `pyproject.toml` + `src/`, optionally `git clone` to `/content/gradient-ascent` (with `GITHUB_TOKEN` for a private repo), `os.chdir` into the project, then prepend the project root and `src/` to `sys.path`. Run that cell before any other code cell.
+
 ## CIFAR-10 download fallbacks
 
 **Problem.** `torchvision.datasets.CIFAR10` uses a single Toronto URL; the host sometimes returns **503** or is unavailable, breaking fresh Colab or CI with `download=True`.
