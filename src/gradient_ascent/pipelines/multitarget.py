@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from ..constants import ALGORITHM_ORDER, SIMILARITY_REFERENCES
+from ..correlation import run_epochwise_similarity_outcome_correlation, run_similarity_mia_correlation_analysis
 from ..experiments import (
     CoreExperimentArtifacts,
     TrajectoryExperimentConfig,

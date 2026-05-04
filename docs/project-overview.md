@@ -6,7 +6,7 @@ Reproducible **PyTorch** pipeline to train a **ResNet-50** on **CIFAR-10**, **un
 
 ## Main entry point
 
-- **Notebook:** `notebooks/hayden_notebook.ipynb`  
+- **Notebook:** `notebooks/experiments.ipynb` (thin cells; drivers in `src/gradient_ascent/experiments_notebook.py`)  
   Orchestrates training, unlearning, similarity/MIA trajectories, and combined plots via helpers in `src/gradient_ascent/`.
 
 ## Core package (`src/gradient_ascent/`)

@@ -29,7 +29,7 @@ Orchestration moved into:
 - `notebook_bootstrap.py` — Colab/local bootstrap, editable install  
 - `notebook_helpers.py` — `run_and_display_*` pipelines  
 
-**Rationale.** Less copy-paste in `hayden_notebook.ipynb`, clearer reproducibility, same execution order and artefacts (refactor only).
+**Rationale.** Less copy-paste in `experiments.ipynb`, clearer reproducibility, same execution order and artefacts (refactor only).
 
 ## References
 

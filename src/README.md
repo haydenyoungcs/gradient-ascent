@@ -12,8 +12,10 @@
 | `mia.py` | Membership inference attackers and trajectory rows |
 | `trajectories.py` | Snapshot iteration, similarity plots, timing |
 | `reporting.py` | CSVs and matplotlib helpers |
+| `correlation.py` | Run-level and epoch-wise similarity vs MIA/accuracy correlations; CSVs and plots |
 | `notebook_runtime.py` | `NotebookRuntime`, `SimilaritySetup`, trajectory defaults, W&B config flattening |
 | `notebook_helpers.py` | Notebook entrypoints: prepare runtime, core/trajectory display pipelines |
+| `experiments_notebook.py` | Drivers for `notebooks/experiments.ipynb` (bootstrap + numbered sections) |
 | `notebook_bootstrap.py` | Colab/local environment bootstrap |
 | `pipelines/multitarget.py` | Full forget-class sweep + macro-averaged exports |
 

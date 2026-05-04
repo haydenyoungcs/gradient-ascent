@@ -17,7 +17,7 @@ Start at **[docs/README.md](docs/README.md)** for methodology and engineering no
 
 ## Running
 
-- Main workflow: `notebooks/hayden_notebook.ipynb`
+- Main workflow: `notebooks/experiments.ipynb`
 - Package: `pip install -e .` from repo root, then `import gradient_ascent`
 
 Install and dependencies: see `pyproject.toml` / `requirements.txt`.

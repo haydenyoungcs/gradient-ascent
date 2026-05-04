@@ -42,7 +42,9 @@ from .notebook_runtime import (
 from .pipelines.multitarget import (
     MultiTargetAggregateArtifacts,
     _load_similarity_epoch_rows_from_csv,
+    run_epochwise_similarity_outcome_correlation,
     run_multitarget_averaged_experiment,
+    run_similarity_mia_correlation_analysis,
 )
 from .reporting import orient_epoch_rows_for_similarity
 from .similarity import (
@@ -531,6 +533,38 @@ def run_and_display_notebook_combined_comparison(runtime: NotebookRuntime, wandb
     print(f"Saved integrated comparison figure to {combined_path}")
     display(IPyImage(filename=combined_path))
     return combined_path
+
+
+def run_similarity_mia_correlation_from_notebook(
+    runtime: NotebookRuntime,
+    *,
+    multitarget_aggregate_dir: Optional[str] = None,
+    **kwargs,
+) -> dict[str, Path]:
+    """Correlate scalar similarity movement with MIA reduction using saved multitarget CSVs.
+
+    Defaults to ``<runtime.out_dir>/multitarget_aggregate``, matching
+    ``run_multitarget_averaged_experiment``. Pass ``multitarget_aggregate_dir`` after a
+    custom ``out_dir`` there. Extra keyword arguments are forwarded to
+    ``run_similarity_mia_correlation_analysis``.
+    """
+    base = Path(multitarget_aggregate_dir or os.path.join(runtime.out_dir, "multitarget_aggregate"))
+    return run_similarity_mia_correlation_analysis(base, **kwargs)
+
+
+def run_epochwise_similarity_proxy_analysis_from_notebook(
+    runtime: NotebookRuntime,
+    *,
+    multitarget_aggregate_dir: Optional[str] = None,
+    **kwargs,
+) -> dict[str, Path]:
+    """At each unlearning step, correlate layer-mean similarity with MIA and accuracy across runs.
+
+    Forwards to ``run_epochwise_similarity_outcome_correlation`` on the multitarget root.
+    Typical kwargs: ``references=("retrained", "original")``, ``min_n=15``.
+    """
+    base = Path(multitarget_aggregate_dir or os.path.join(runtime.out_dir, "multitarget_aggregate"))
+    return run_epochwise_similarity_outcome_correlation(base, **kwargs)
 
 
 def _compute_mean_forget_loss_and_grad_norm(model, loader, device):
