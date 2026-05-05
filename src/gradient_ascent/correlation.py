@@ -446,38 +446,23 @@ def compute_correlations(
 ) -> pd.DataFrame:
     """Pooled Pearson/Spearman correlations across all rows in the table.
 
-    One block of outputs per (reference, similarity_metric). Preferred x feature
-    is ``max_changed_layer_delta`` (largest-|Δ| layer, signed). Legacy top-k
-    means are still included when present for backwards-compatible diagnostics.
+    One block of outputs per (reference, similarity_metric). X features are
+    **signed** similarity endpoint movement (positive = more similar to the
+    reference after unlearning): ``max_changed_layer_delta`` when present, else
+    top-2 or top-k mean deltas.
     """
     if correlation_table.empty:
         return pd.DataFrame()
 
     out_rows: list[dict] = []
+    # Signed similarity movement only (positive = more similar to reference after unlearning).
     x_candidates: list[tuple[str, str]] = []
     if "max_changed_layer_delta" in correlation_table.columns:
-        x_candidates.extend(
-            [
-                ("max_changed_layer_delta", "max_changed_layer_delta"),
-                ("max_changed_layer_abs_delta", "max_changed_layer_abs_delta"),
-            ]
-        )
+        x_candidates.append(("max_changed_layer_delta", "max_changed_layer_delta"))
     if "top2_mean_delta" in correlation_table.columns:
-        x_candidates.extend(
-            [
-                ("top2_mean_delta", "top2_mean_delta"),
-                ("top2_mean_abs_delta", "top2_mean_abs_delta"),
-            ]
-        )
+        x_candidates.append(("top2_mean_delta", "top2_mean_delta"))
     if "topk_mean_delta" in correlation_table.columns:
-        x_candidates.extend(
-            [
-                ("topk_mean_delta", "topk_mean_delta"),
-                ("topk_mean_abs_delta", "topk_mean_abs_delta"),
-            ]
-        )
-    if "max_abs_delta" in correlation_table.columns:
-        x_candidates.append(("max_abs_delta", "max_abs_delta"))
+        x_candidates.append(("topk_mean_delta", "topk_mean_delta"))
 
     for ref in correlation_table["reference"].unique():
         sub_ref = correlation_table[correlation_table["reference"] == ref]
@@ -521,8 +506,14 @@ def scatter_similarity_vs_mia(
     x_col: str,
     y_col: str = "mia_reduction",
     title: str | None = None,
+    corr_text_loc: str = "upper left",
 ) -> Path:
-    """Scatter with algorithm colour and a simple least-squares line."""
+    """Scatter with algorithm colour, least-squares line, and pooled correlation caption.
+
+    Pearson/Spearman are computed on the same finite ``(x_col, y_col)`` pairs as the
+    scatter (pooled across algorithms). The caption is drawn in axes coordinates so it
+    stays in a fixed corner and usually avoids overlapping the cloud of points.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if table.empty or x_col not in table.columns:
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -549,17 +540,55 @@ def scatter_similarity_vs_mia(
     x = table[x_col].to_numpy(dtype=np.float64)
     y = table[y_col].to_numpy(dtype=np.float64)
     mask = np.isfinite(x) & np.isfinite(y)
-    if int(mask.sum()) >= 2:
+    n_pts = int(mask.sum())
+    if n_pts >= 2:
         coef = np.polyfit(x[mask], y[mask], 1)
         xs = np.linspace(float(np.min(x[mask])), float(np.max(x[mask])), 50)
         ax.plot(xs, np.poly1d(coef)(xs), color="black", linewidth=1.2, linestyle="--", label="LS line")
+
+    if n_pts >= 3:
+        x2, y2 = x[mask], y[mask]
+        if float(np.nanstd(x2)) >= 1e-12 and float(np.nanstd(y2)) >= 1e-12:
+            pr, pp = stats.pearsonr(x2, y2)
+            sr, sp = stats.spearmanr(x2, y2)
+            corr_text = (
+                f"Pearson r = {pr:+.3f}, p = {pp:.3g}\n"
+                f"Spearman rho = {sr:+.3f}, p = {sp:.3g}\n"
+                f"n = {n_pts}"
+            )
+        else:
+            corr_text = f"n = {n_pts}\n(constant x or y; r undefined)"
+    elif n_pts == 2:
+        corr_text = "n = 2 (need n >= 3 for correlation)"
+    else:
+        corr_text = "n < 2"
+
+    _loc_axes = {
+        "upper left": (0.02, 0.98, "left", "top"),
+        "upper right": (0.98, 0.98, "right", "top"),
+        "lower left": (0.02, 0.02, "left", "bottom"),
+        "lower right": (0.98, 0.02, "right", "bottom"),
+    }
+    xa, ya, ha, va = _loc_axes.get(corr_text_loc, _loc_axes["upper left"])
+    ax.text(
+        xa,
+        ya,
+        corr_text,
+        transform=ax.transAxes,
+        fontsize=9,
+        ha=ha,
+        va=va,
+        linespacing=1.25,
+        bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="0.55", alpha=0.92),
+    )
 
     ax.axhline(0.0, color="gray", linewidth=0.8, linestyle=":")
     ax.axvline(0.0, color="gray", linewidth=0.8, linestyle=":")
     ax.set_xlabel(x_col)
     ax.set_ylabel(y_col)
     ax.set_title(title or f"{y_col} vs {x_col}")
-    ax.legend(loc="best", fontsize="small", ncol=2)
+    # Lower right keeps the upper-left correlation box readable (legend "best" often collides).
+    ax.legend(loc="lower right", fontsize="small", ncol=2, framealpha=0.92)
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
@@ -573,6 +602,7 @@ def bar_correlation_summary(
     out_path: Path,
     reference: str,
     x_feature: str,
+    y_feature: str = "mia_reduction",
     correlation_type: str = "spearman",
 ) -> Path:
     """Bar chart: similarity metric vs correlation coefficient for one x_feature."""
@@ -580,6 +610,7 @@ def bar_correlation_summary(
     sub = corr_df[
         (corr_df["reference"] == reference)
         & (corr_df["x_feature"] == x_feature)
+        & (corr_df["y_feature"] == y_feature)
         & (corr_df["correlation_type"] == correlation_type)
     ]
     if sub.empty:
@@ -599,7 +630,7 @@ def bar_correlation_summary(
     ax.set_xticklabels(order, rotation=25, ha="right")
     ax.axhline(0.0, color="black", linewidth=0.8)
     ax.set_ylabel(f"{correlation_type} r")
-    ax.set_title(f"{reference}: {x_feature} vs mia_reduction")
+    ax.set_title(f"{reference}: {x_feature} vs {y_feature}")
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
@@ -886,7 +917,9 @@ def run_similarity_mia_correlation_analysis(
     table_csv = corr_root / "similarity_mia_correlation_table.csv"
     table.to_csv(table_csv, index=False)
 
-    corr = compute_correlations(table)
+    y_targets: tuple[str, ...] = ("mia_reduction", "forget_accuracy_reduction")
+    corr_frames = [compute_correlations(table, y_col=y) for y in y_targets if y in table.columns]
+    corr = pd.concat(corr_frames, ignore_index=True) if corr_frames else pd.DataFrame()
     summary_csv = corr_root / "similarity_mia_correlation_summary.csv"
     corr.to_csv(summary_csv, index=False)
 
@@ -894,11 +927,11 @@ def run_similarity_mia_correlation_analysis(
 
     x_scatter_cols: list[str] = []
     if "max_changed_layer_delta" in table.columns:
-        x_scatter_cols.extend(["max_changed_layer_delta", "max_changed_layer_abs_delta"])
+        x_scatter_cols.append("max_changed_layer_delta")
     elif top_k_layers == 2 and "top2_mean_delta" in table.columns:
-        x_scatter_cols.extend(["top2_mean_delta", "top2_mean_abs_delta"])
+        x_scatter_cols.append("top2_mean_delta")
     else:
-        x_scatter_cols.extend(["topk_mean_delta", "topk_mean_abs_delta"])
+        x_scatter_cols.append("topk_mean_delta")
 
     for ref in references:
         sub_ref = table[table["reference"] == ref]
@@ -907,23 +940,35 @@ def run_similarity_mia_correlation_analysis(
             for xc in x_scatter_cols:
                 if xc not in block.columns:
                     continue
-                fname = f"scatter_{ref}_{metric}_{xc}_vs_mia_reduction.png"
-                pth = corr_root / fname
-                scatter_similarity_vs_mia(
-                    block,
-                    out_path=pth,
-                    x_col=xc,
-                    y_col="mia_reduction",
-                    title=f"{ref} | {metric}: {xc} vs mia_reduction",
-                )
-                paths[f"scatter_{ref}_{metric}_{xc}"] = pth
+                for y_col in y_targets:
+                    if y_col not in block.columns:
+                        continue
+                    fname = f"scatter_{ref}_{metric}_{xc}_vs_{y_col}.png"
+                    pth = corr_root / fname
+                    scatter_similarity_vs_mia(
+                        block,
+                        out_path=pth,
+                        x_col=xc,
+                        y_col=y_col,
+                        title=f"{ref} | {metric}: {xc} vs {y_col}",
+                    )
+                    paths[f"scatter_{ref}_{metric}_{xc}_{y_col}"] = pth
 
         bar_features = list(dict.fromkeys(x_scatter_cols))
         for use_x in bar_features:
             if use_x not in table.columns:
                 continue
-            pth = corr_root / f"correlation_summary_{ref}_{use_x}.png"
-            bar_correlation_summary(corr, out_path=pth, reference=ref, x_feature=use_x)
-            paths[f"bar_summary_{ref}_{use_x}"] = pth
+            for y_col in y_targets:
+                if y_col not in table.columns:
+                    continue
+                pth = corr_root / f"correlation_summary_{ref}_{use_x}_vs_{y_col}.png"
+                bar_correlation_summary(
+                    corr,
+                    out_path=pth,
+                    reference=ref,
+                    x_feature=use_x,
+                    y_feature=y_col,
+                )
+                paths[f"bar_summary_{ref}_{use_x}_{y_col}"] = pth
 
     return paths

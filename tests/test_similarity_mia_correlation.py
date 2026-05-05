@@ -157,6 +157,21 @@ class CorrelationValuesTest(unittest.TestCase):
         self.assertEqual(len(sub), 1)
         self.assertAlmostEqual(float(sub.iloc[0]["r"]), 1.0)
 
+    def test_forget_accuracy_reduction_y_col(self) -> None:
+        df = pd.DataFrame(
+            {
+                "reference": ["retrained"] * 5,
+                "similarity_metric": ["cosine"] * 5,
+                "top2_mean_delta": [0.0, 1.0, 2.0, 3.0, 4.0],
+                "forget_accuracy_reduction": [0.0, 0.1, 0.2, 0.3, 0.4],
+            }
+        )
+        corr = compute_correlations(df, y_col="forget_accuracy_reduction")
+        sub = corr[(corr["correlation_type"] == "pearson") & (corr["x_feature"] == "top2_mean_delta")]
+        self.assertEqual(len(sub), 1)
+        self.assertEqual(sub.iloc[0]["y_feature"], "forget_accuracy_reduction")
+        self.assertAlmostEqual(float(sub.iloc[0]["r"]), 1.0)
+
 
 class MissingHandlingTest(unittest.TestCase):
     def test_missing_similarity_warns_and_skips(self) -> None:

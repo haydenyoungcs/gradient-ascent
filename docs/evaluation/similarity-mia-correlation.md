@@ -13,11 +13,9 @@ For each similarity metric and each layer:
 3. Rank layers by `abs_delta` and identify the **single most-changed layer** (largest `|delta|`).
 4. Report:
    - **`max_changed_layer_delta`**: signed endpoint change on that layer in native units, with a unified sign convention: **positive always means more similar**. For lower-is-better metrics (`euclidean`, `kl_sym`) this is implemented by sign-flipping the raw endpoint difference.
-   - **`max_changed_layer_abs_delta`**: absolute endpoint change on that same layer.
-   - **`max_abs_delta`**: same magnitude as above, kept as a diagnostic alias.
-   - (Legacy) top-k means are still written to CSV for backwards compatibility but are no longer the primary score used in correlation plots.
+   - **`max_changed_layer_abs_delta`**, **`max_abs_delta`**: still written to the CSV for manual diagnostics; **run-level correlation plots and pooled correlations use signed x-features only** (no duplicate abs-magnitude plots).
 
-`top_k_layers` is still available for legacy table columns, but primary scatter/bar correlation outputs now use the single-layer max-change feature above.
+`top_k_layers` is still available for legacy table columns, but primary scatter/bar correlation outputs use the single-layer max-change signed feature above.
 
 ## Which reference?
 
@@ -34,6 +32,12 @@ Definitions:
 - **`mia_reduction`** = start − end so that **positive** values mean the attack became **less confident** on the forget set after unlearning (the usual “better privacy” direction for this score).
 
 Override the MIA column with `mia_value_col` when comparing other attackers.
+
+## Forget-class accuracy change (utility alongside MIA)
+
+From `classwise_accuracy_<algo>.csv`, the run-level table includes **`forget_accuracy_reduction`** = (forget accuracy at first step) − (forget accuracy at last step), in 0–1 units. **Positive** values mean the forgotten class became **harder** to classify after unlearning (the usual successful-unlearning direction for utility on that class). Pooled correlations and scatter plots use the **same signed similarity deltas** as for MIA, with `y_feature = forget_accuracy_reduction`, so you can read whether representation movement toward the retrain reference aligns with forget-set accuracy drops as well as with MIA reduction.
+
+*Rationale:* Shokri et al. (2017) and Carlini et al. (2022) motivate MIA as a privacy probe; unlearning papers including Bourtoule et al. (2021) also report **task accuracy** on forgotten data. Treating both as outcomes checks whether a representation proxy tracks **privacy** and **utility** signals jointly or only one of them.
 
 ## Input data and orientation
 
@@ -63,15 +67,16 @@ Typical files:
 | File | Role |
 |------|------|
 | `similarity_mia_correlation_table.csv` | One row per algorithm, forget class, reference, and similarity metric |
-| `similarity_mia_correlation_summary.csv` | Pooled Pearson/Spearman correlations (`p_value` from SciPy) |
-| `scatter_<reference>_<metric>_<feature>_vs_mia_reduction.png` | Scatter by algorithm colour with a dashed least-squares line |
-| `correlation_summary_<reference>_<feature>.png` | Bar chart of Spearman r across metrics for a chosen x feature |
+| `similarity_mia_correlation_summary.csv` | Pooled Pearson/Spearman correlations for **`mia_reduction`** and **`forget_accuracy_reduction`** (`y_feature` column distinguishes them; `p_value` from SciPy) |
+| `scatter_<reference>_<metric>_<signed_feature>_vs_<y>.png` | Scatter by algorithm colour with a dashed least-squares line and an inset box with **Pearson/Spearman r**, **p**, and **n** (same pooled points as the plot; `scatter_similarity_vs_mia(..., corr_text_loc=...)` can move the box: `upper left` / `upper right` / …) (`y` is `mia_reduction` or `forget_accuracy_reduction`) |
+| `correlation_summary_<reference>_<signed_feature>_vs_<y>.png` | Bar chart of Spearman r across similarity metrics for a chosen signed x feature and outcome `y` |
 
 For multitarget experiments, pass the **aggregate directory** that contains `target_0`, …, `target_9` (default in the notebook helper: `<runtime.out_dir>/multitarget_aggregate`).
 
 ## Interpreting correlations
 
 - **Positive r** between `max_changed_layer_delta` (retrained) and `mia_reduction`: runs whose most-shifted layer moved **toward** retrain also tended to show **larger** MIA reductions (attack confidence dropped more).
+- **Positive r** between the same signed delta and `forget_accuracy_reduction`: more movement toward the retrain reference tended to co-occur with **larger** drops in forget-class accuracy (aligned privacy and utility signals on the forgotten class).
 - **Negative r**: more retrain similarity associated with **smaller** MIA reductions (explore confounders — utility, hyperparameters, or class difficulty).
 - **Weak \|r\| with large p**: little linear/monotonic association across the ~50 run-level points; do not over-interpret.
 - **Strong \|r\| with small p**: suggestive only — this is **exploratory** analysis on a modest sample size (5 algorithms × 10 forget classes per metric unless you enrich with more runs or intermediate steps).
