@@ -8,11 +8,11 @@ Layer-wise similarity trajectories produce **many** numbers per unlearning step 
 
 For each similarity metric and each layer:
 
-1. Read the **oriented** similarity at the first and last recorded unlearning steps (same min–max orientation as the trajectory plots: higher = more similar).
+1. Read the **raw (unscaled)** similarity at the first and last recorded unlearning steps from the trajectory CSV.
 2. Define `delta = end − start` and `abs_delta = |delta|`.
 3. Rank layers by `abs_delta` and identify the **single most-changed layer** (largest `|delta|`).
 4. Report:
-   - **`max_changed_layer_delta`**: signed endpoint change on that layer — positive means the run ended **more similar** to the reference than it started.
+   - **`max_changed_layer_delta`**: signed endpoint change on that layer in native units, with a unified sign convention: **positive always means more similar**. For lower-is-better metrics (`euclidean`, `kl_sym`) this is implemented by sign-flipping the raw endpoint difference.
    - **`max_changed_layer_abs_delta`**: absolute endpoint change on that same layer.
    - **`max_abs_delta`**: same magnitude as above, kept as a diagnostic alias.
    - (Legacy) top-k means are still written to CSV for backwards compatibility but are no longer the primary score used in correlation plots.
@@ -38,7 +38,8 @@ Override the MIA column with `mia_value_col` when comparing other attackers.
 ## Input data and orientation
 
 - Similarity CSVs on disk (`similarity_vs_unlearning_epoch_<algo>_vs_<reference>.csv`) store **raw** metric values.
-- This analysis applies `orient_epoch_rows_for_similarity` from `reporting.py` before computing deltas, matching the thesis figures (higher = more similar for every metric column).
+- Run-level endpoint deltas in this section are computed on **raw (unscaled)** values, so x-axes are in the original metric units.
+- Epoch-wise correlations (Section "Step-wise correlations") still use `orient_epoch_rows_for_similarity` layer means to stay consistent with trajectory figures (higher = more similar for every metric column).
 - By default, those similarity CSVs are now generated from **forget-class test data only** (`TrajectoryExperimentConfig.similarity_data_mode="forget"`). This is intentional: the downstream MIA target is also the forget set, so the representation proxy is aligned with the privacy outcome being tested.
 
 ### Changing the similarity data source

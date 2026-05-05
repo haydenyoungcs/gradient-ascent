@@ -1,8 +1,8 @@
 """Scalar similarity change vs MIA reduction for dissertation-style exploratory analysis.
 
-Similarity trajectory CSVs store **raw** metric values. Plots re-scale them with
-``orient_epoch_rows_for_similarity`` so that higher always means more similar.
-This module applies the same orientation before computing start/end deltas.
+Similarity trajectory CSVs store **raw** metric values. Run-level endpoint
+features in this module use those raw values directly (unscaled deltas).
+Epoch-wise analyses still use oriented layer means to match trajectory plots.
 """
 
 from __future__ import annotations
@@ -98,21 +98,22 @@ def compute_topk_layer_delta(
     similarity_df: pd.DataFrame,
     metric: str,
     k: int = 2,
+    lower_is_more_similar: bool = False,
     epoch_col: str = "epoch",
     layer_col: str = "layer",
     value_col: str | None = None,
 ) -> pd.DataFrame:
     """Pick top-k layers by absolute similarity change (end − start) for one metric.
 
-    ``similarity_df`` should already be **oriented** if you want comparable signs
-    with the thesis plots (higher = more similar). The wide metric column is
-    named ``metric`` unless ``value_col`` is set.
+    The wide metric column is named ``metric`` unless ``value_col`` is set.
 
     Returns a one-row DataFrame with diagnostics.
 
     In addition to top-k means, this always reports the single-layer endpoint
     change for the most-shifted layer (largest ``abs_delta``):
     ``max_changed_layer_delta`` (signed) and ``max_changed_layer_abs_delta``.
+    If ``lower_is_more_similar`` is True (e.g., Euclidean/KL), delta signs are
+    flipped so that positive always means "more similar".
     """
     if value_col is None:
         value_col = metric
@@ -134,7 +135,8 @@ def compute_topk_layer_delta(
         else:
             start_v, end_v = float(vals[0]), float(vals[-1])
             start_e, end_e = int(epochs[0]), int(epochs[-1])
-        delta = end_v - start_v
+        raw_delta = end_v - start_v
+        delta = -raw_delta if lower_is_more_similar else raw_delta
         layer_stats.append(
             {
                 layer_col: str(layer),
@@ -202,14 +204,16 @@ def summarise_similarity_deltas(
     similarity_df: pd.DataFrame,
     metrics: Optional[list[str]] = None,
     k: int = 2,
+    lower_better_metrics: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
     """Top-k layer deltas for every metric column present (unknown metrics are skipped)."""
     want = list(metrics) if metrics is not None else list(DEFAULT_SIMILARITY_METRICS)
+    lower = set(lower_better_metrics) if lower_better_metrics is not None else set(LOWER_BETTER_METRICS)
     frames: list[pd.DataFrame] = []
     for m in want:
         if m not in similarity_df.columns:
             continue
-        frames.append(compute_topk_layer_delta(similarity_df, m, k=k))
+        frames.append(compute_topk_layer_delta(similarity_df, m, k=k, lower_is_more_similar=(m in lower)))
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -383,14 +387,19 @@ def build_similarity_mia_correlation_table(
                 try:
                     sim_df = load_similarity_csv(
                         sp,
-                        apply_orientation=True,
+                        apply_orientation=False,
                         lower_better_metrics=lower_better_metrics,
                     )
                 except (FileNotFoundError, ValueError) as exc:
                     warnings.warn(f"Similarity load failed for {sp}: {exc}", UserWarning, stacklevel=2)
                     continue
 
-                summ = summarise_similarity_deltas(sim_df, metrics=metrics_filter, k=top_k_layers)
+                summ = summarise_similarity_deltas(
+                    sim_df,
+                    metrics=metrics_filter,
+                    k=top_k_layers,
+                    lower_better_metrics=lower_better_metrics,
+                )
                 if summ.empty:
                     warnings.warn(f"No overlap metrics for {sp}; skipping.", UserWarning, stacklevel=2)
                     continue
