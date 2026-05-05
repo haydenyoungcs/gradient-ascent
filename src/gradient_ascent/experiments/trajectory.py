@@ -147,7 +147,12 @@ def run_trajectory_analysis(
             device,
             similarity_log_prefix_map=similarity_log_prefix_map,
             activation_cache_dir=(
-                os.path.join(config.out_dir, config.similarity_activation_cache_subdir, algorithm_key)
+                os.path.join(
+                    config.out_dir,
+                    config.similarity_activation_cache_subdir,
+                    f"{config.similarity_data_mode}_mode",
+                    algorithm_key,
+                )
                 if config.cache_similarity_activations
                 else None
             ),
