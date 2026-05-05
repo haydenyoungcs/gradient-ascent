@@ -3,8 +3,9 @@ from __future__ import annotations
 import csv
 import math
 import os
+from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -323,12 +324,13 @@ def run_notebook_trajectory_experiment(
     runtime: NotebookRuntime,
     core_artifacts: CoreExperimentArtifacts,
     similarity_setup: SimilaritySetup,
+    similarity_data_mode: Literal["forget", "retain", "test"] = "forget",
     wandb_module=None,
     wandb_project: str = "gradient-ascent",
     wandb_name: str = "unlearning-algorithm-comparison",
 ) -> tuple[TrajectoryExperimentArtifacts, object]:
     """Run the notebook's full trajectory/MIA/similarity pipeline."""
-    trajectory_config = build_default_trajectory_config(runtime)
+    trajectory_config = replace(build_default_trajectory_config(runtime), similarity_data_mode=similarity_data_mode)
     similarity_setup = similarity_setup_with_trajectory_cca(similarity_setup, trajectory_config)
     wandb_run = ensure_wandb_run(wandb_module, project=wandb_project, name=wandb_name)
     artifacts = run_trajectory_analysis(
@@ -474,6 +476,7 @@ def run_and_display_notebook_trajectory_pipeline(
     runtime: NotebookRuntime,
     core_artifacts: CoreExperimentArtifacts,
     similarity_setup: SimilaritySetup,
+    similarity_data_mode: Literal["forget", "retain", "test"] = "forget",
     wandb_module=None,
 ):
     """Run trajectory/MIA/similarity analysis and display all generated figures."""
@@ -484,6 +487,7 @@ def run_and_display_notebook_trajectory_pipeline(
         runtime,
         core_artifacts,
         similarity_setup,
+        similarity_data_mode=similarity_data_mode,
         wandb_module=wandb_module,
     )
 

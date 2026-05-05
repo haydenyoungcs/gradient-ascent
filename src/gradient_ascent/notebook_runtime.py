@@ -70,6 +70,7 @@ def build_default_trajectory_config(runtime: NotebookRuntime) -> TrajectoryExper
         model_depth=runtime.model_depth,
         out_dir=runtime.out_dir,
         trajectory_batch_size=512 if runtime.use_bf16 else 256,
+        similarity_data_mode="forget",
     )
 
 

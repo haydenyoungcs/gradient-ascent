@@ -11,7 +11,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from .notebook_bootstrap import NotebookBootstrapResult, bootstrap_notebook_environment
 from .pipelines.multitarget import MultiTargetAggregateArtifacts
@@ -135,20 +135,28 @@ def experiments_section_core(
     return runtime, core_artifacts, cfg
 
 
+@dataclass
+class TrajectorySectionConfig:
+    similarity_data_mode: Literal["forget", "retain", "test"] = "forget"
+
+
 def experiments_section_trajectory(
     runtime: Any,
     core_artifacts: Any,
     *,
     wandb_module: Any,
+    config: Optional[TrajectorySectionConfig] = None,
 ) -> tuple[Any, Any, Any]:
     """Section 2 — similarity + MIA trajectories for all baselines."""
     from .notebook_helpers import prepare_similarity_setup, run_and_display_notebook_trajectory_pipeline
 
+    cfg = config or TrajectorySectionConfig()
     similarity_setup = prepare_similarity_setup()
     trajectory_artifacts, trajectory_wandb_run = run_and_display_notebook_trajectory_pipeline(
         runtime,
         core_artifacts,
         similarity_setup,
+        similarity_data_mode=cfg.similarity_data_mode,
         wandb_module=wandb_module,
     )
     return similarity_setup, trajectory_artifacts, trajectory_wandb_run
@@ -260,6 +268,7 @@ class MultitargetSectionConfig:
     reuse_trajectory_outputs: bool = True
     seed_frog_target_from_single_run: bool = True
     frog_target_label: int = 6
+    similarity_data_mode: Literal["forget", "retain", "test"] = "forget"
 
 
 def experiments_section_multitarget(
@@ -293,6 +302,7 @@ def experiments_section_multitarget(
         reuse_retrained_checkpoint=core_config.reuse_retrained_checkpoint,
         reuse_unlearned_checkpoints=core_config.reuse_unlearned_checkpoints,
         reuse_trajectory_outputs=cfg.reuse_trajectory_outputs,
+        similarity_data_mode=cfg.similarity_data_mode,
         shared_original_checkpoint_path=str(multi_root / "shared" / "original_net.pt"),
     )
     print("Saved multi-target aggregate artefacts under:", str(multi_root))
@@ -342,4 +352,5 @@ def experiments_section_correlation(
 
 # Default section configs (edit attributes in-notebook if needed before calling).
 DEFAULT_CORE_CONFIG = CoreSectionConfig()
+DEFAULT_TRAJECTORY_CONFIG = TrajectorySectionConfig()
 DEFAULT_MULTITARGET_CONFIG = MultitargetSectionConfig()

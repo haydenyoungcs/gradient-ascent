@@ -7,7 +7,7 @@ import os
 import shutil
 import warnings
 from dataclasses import dataclass, replace
-from typing import Optional
+from typing import Literal, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -383,6 +383,7 @@ def run_multitarget_averaged_experiment(
     reuse_retrained_checkpoint: Optional[bool] = None,
     reuse_unlearned_checkpoints: Optional[bool] = None,
     reuse_trajectory_outputs: bool = True,
+    similarity_data_mode: Literal["forget", "retain", "test"] = "forget",
     shared_original_checkpoint_path: Optional[str] = None,
 ) -> MultiTargetAggregateArtifacts:
     """Run forget-label sweeps (default 0..9) and build averaged utility/similarity plots.
@@ -493,6 +494,7 @@ def run_multitarget_averaged_experiment(
                 out_dir=target_out_dir,
                 target_label=int(target_label),
                 retain_control_label=int((int(target_label) + 1) % runtime.num_classes),
+                similarity_data_mode=similarity_data_mode,
             )
             similarity_setup_for_target = similarity_setup_with_trajectory_cca(similarity_setup, trajectory_config)
             wandb_run = ensure_wandb_run(

@@ -4,6 +4,8 @@
 
 Reproducible **PyTorch** pipeline to train a **ResNet-50** on **CIFAR-10**, **unlearn** a chosen class (or run all ten forget classes), compare against **retrain-from-scratch** references, and evaluate with **classwise accuracy**, **representation similarity** (CKA, CCA, cosine, Euclidean, symmetric KL), and **membership inference attacks (MIA)** along unlearning trajectories.
 
+Similarity trajectories now default to using **forget-class test samples only** (`similarity_data_mode="forget"`), so representation analysis is aligned with the core unlearning objective.
+
 ## Main entry point
 
 - **Notebook:** `notebooks/experiments.ipynb` (thin cells; drivers in `src/gradient_ascent/experiments_notebook.py`)  
@@ -40,3 +42,4 @@ Reproducible **PyTorch** pipeline to train a **ResNet-50** on **CIFAR-10**, **un
 - MIA design and caveats: [evaluation/membership-inference.md](evaluation/membership-inference.md)
 - SSD/SCRUB methodology: [methods/ssd-and-scrub.md](methods/ssd-and-scrub.md)
 - Similarity plots and runtime: [similarity/visualisation-and-performance.md](similarity/visualisation-and-performance.md)
+- Similarity/MIA correlation protocol: [evaluation/similarity-mia-correlation.md](evaluation/similarity-mia-correlation.md)

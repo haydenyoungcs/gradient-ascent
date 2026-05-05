@@ -65,11 +65,25 @@ def run_trajectory_analysis(
             raise FileNotFoundError(f"Missing checkpoint: {path}")
 
     t0 = time.perf_counter()
-    testloader = make_loader(testset, config.trajectory_batch_size, False, num_workers, use_cuda)
+    similarity_dataset = testset
+    similarity_label = "test"
+    if config.similarity_data_mode == "forget":
+        similarity_dataset, _ = make_forget_retain_subsets(testset, config.target_label)
+        similarity_label = f"forget(test, class={config.target_label})"
+    elif config.similarity_data_mode == "retain":
+        _, similarity_dataset = make_forget_retain_subsets(testset, config.target_label)
+        similarity_label = f"retain(test, without class={config.target_label})"
+    elif config.similarity_data_mode != "test":
+        raise ValueError(
+            f"Unsupported similarity_data_mode={config.similarity_data_mode!r}; expected one of "
+            "('forget', 'retain', 'test')."
+        )
+    testloader = make_loader(similarity_dataset, config.trajectory_batch_size, False, num_workers, use_cuda)
     stage_timing_seconds["build_test_loader"] = time.perf_counter() - t0
     print(
-        "[Trajectory] Built test loader "
-        f"(batch_size={config.trajectory_batch_size}) in {stage_timing_seconds['build_test_loader']:.1f}s"
+        "[Trajectory] Built similarity loader "
+        f"(source={similarity_label}, batch_size={config.trajectory_batch_size}) "
+        f"in {stage_timing_seconds['build_test_loader']:.1f}s"
     )
 
     t0 = time.perf_counter()

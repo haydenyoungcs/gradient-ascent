@@ -6,6 +6,23 @@ This note covers **what figures the trajectory stage produces**, **why they look
 
 ## Part A — Visualisation choices
 
+### Similarity input data (default changed)
+
+Similarity metrics are computed on layer activations, so they depend on which data is fed through the models. The trajectory config now exposes:
+
+- `TrajectoryExperimentConfig.similarity_data_mode = "forget" | "retain" | "test"`
+- default: `"forget"`
+
+Current dissertation default is **forget-only test data**, i.e. activations are collected from the forgotten class in `testset`.
+
+**Rationale for defaulting to forget-only** (for your research question):
+
+1. The unlearning target is class-conditional deletion, so representation movement on the forgotten class is the most direct signal to compare against forget-set MIA.
+2. Prior unlearning evaluations emphasise class- or sample-targeted forgetting efficacy in addition to utility, so a target-focused representation probe is defensible in that framing.
+3. Using held-out test forget data avoids leakage from training members while keeping activation extraction reproducible.
+
+If you want a global drift view, set `similarity_data_mode="test"`; for utility-preservation representation checks, set `similarity_data_mode="retain"`.
+
 ### Evolving bar GIFs (per step)
 
 For each algorithm and reference (`retrained`, `original`), the pipeline saves:
@@ -101,6 +118,8 @@ When both sides have the **same** feature width, use one random column index set
 
 ### References
 
+- Bourtoule et al. (2021), "Machine Unlearning", IEEE S&P, [https://doi.org/10.1109/SP40001.2021.00019](https://doi.org/10.1109/SP40001.2021.00019).  
+- Shokri et al. (2017), "Membership Inference Attacks Against Machine Learning Models", IEEE S&P, [https://doi.org/10.1109/SP.2017.41](https://doi.org/10.1109/SP.2017.41).  
 - Kornblith et al. (2019), arXiv:1905.00414.  
 - Raghu et al. (2017), SVCCA.  
 - Hardoon et al. (2004), CCA overview.  

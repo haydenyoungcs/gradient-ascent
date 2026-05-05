@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Mapping, Optional, Sequence
+from typing import Dict, Literal, Mapping, Optional, Sequence
 
 from ..unlearning import (
     CertifiedConfig,
@@ -72,6 +72,7 @@ class TrajectoryExperimentConfig:
     target_label: int = 6
     retain_control_label: int = 0
     trajectory_batch_size: int = 256
+    similarity_data_mode: Literal["forget", "retain", "test"] = "forget"
     max_batches_for_similarity: int = 8
     max_activation_samples: Optional[int] = 1024
     activation_subsample_seed: int = 42

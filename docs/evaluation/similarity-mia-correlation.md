@@ -10,13 +10,14 @@ For each similarity metric and each layer:
 
 1. Read the **oriented** similarity at the first and last recorded unlearning steps (same min–max orientation as the trajectory plots: higher = more similar).
 2. Define `delta = end − start` and `abs_delta = |delta|`.
-3. Rank layers by `abs_delta` and take the top **k** layers (default **k = 2**), motivated by the common pattern that one or two blocks move most during unlearning.
+3. Rank layers by `abs_delta` and identify the **single most-changed layer** (largest `|delta|`).
 4. Report:
-   - **`top2_mean_delta`** (when k = 2): mean of the signed deltas on the two selected layers — positive means the run ended **more similar** to the reference than it started, on average over those layers.
-   - **`top2_mean_abs_delta`**: mean absolute delta — **how much** representation moved toward or away from the reference, ignoring direction.
-   - **`max_abs_delta`**: the largest single-layer absolute movement (diagnostic).
+   - **`max_changed_layer_delta`**: signed endpoint change on that layer — positive means the run ended **more similar** to the reference than it started.
+   - **`max_changed_layer_abs_delta`**: absolute endpoint change on that same layer.
+   - **`max_abs_delta`**: same magnitude as above, kept as a diagnostic alias.
+   - (Legacy) top-k means are still written to CSV for backwards compatibility but are no longer the primary score used in correlation plots.
 
-For k ≠ 2, the table uses `topk_mean_delta` / `topk_mean_abs_delta` instead of the `top2_*` names.
+`top_k_layers` is still available for legacy table columns, but primary scatter/bar correlation outputs now use the single-layer max-change feature above.
 
 ## Which reference?
 
@@ -38,6 +39,17 @@ Override the MIA column with `mia_value_col` when comparing other attackers.
 
 - Similarity CSVs on disk (`similarity_vs_unlearning_epoch_<algo>_vs_<reference>.csv`) store **raw** metric values.
 - This analysis applies `orient_epoch_rows_for_similarity` from `reporting.py` before computing deltas, matching the thesis figures (higher = more similar for every metric column).
+- By default, those similarity CSVs are now generated from **forget-class test data only** (`TrajectoryExperimentConfig.similarity_data_mode="forget"`). This is intentional: the downstream MIA target is also the forget set, so the representation proxy is aligned with the privacy outcome being tested.
+
+### Changing the similarity data source
+
+You can switch representation input data with:
+
+- `"forget"` (default): only forgotten class samples from `testset`
+- `"retain"`: all non-forgotten class samples from `testset`
+- `"test"`: full `testset`
+
+Section 2 (single target) and Section 4 (multi-target) both support this switch; Section 5 correlations automatically use whichever similarity CSVs were produced upstream.
 
 ## Outputs
 
@@ -58,7 +70,7 @@ For multitarget experiments, pass the **aggregate directory** that contains `tar
 
 ## Interpreting correlations
 
-- **Positive r** between `top2_mean_delta` (retrained) and `mia_reduction`: runs that became **more** similar to retrain also tended to show **larger** MIA reductions (attack confidence dropped more).
+- **Positive r** between `max_changed_layer_delta` (retrained) and `mia_reduction`: runs whose most-shifted layer moved **toward** retrain also tended to show **larger** MIA reductions (attack confidence dropped more).
 - **Negative r**: more retrain similarity associated with **smaller** MIA reductions (explore confounders — utility, hyperparameters, or class difficulty).
 - **Weak \|r\| with large p**: little linear/monotonic association across the ~50 run-level points; do not over-interpret.
 - **Strong \|r\| with small p**: suggestive only — this is **exploratory** analysis on a modest sample size (5 algorithms × 10 forget classes per metric unless you enrich with more runs or intermediate steps).
@@ -68,6 +80,7 @@ For multitarget experiments, pass the **aggregate directory** that contains `tar
 - About **50** independent-ish rows per metric at the run level (unless you add more algorithms, classes, or seeds).
 - Correlation does not imply causation; algorithm and forget class are entangled with both similarity and MIA.
 - Top‑k layer selection is a **summarisation choice**; robustness checks can vary k or average over all layers.
+- Forget-only similarity can over-focus on target behavior; robustness checks should include retain/full settings and report whether conclusions are stable.
 
 ## Step-wise correlations (as unlearning progresses)
 
@@ -92,3 +105,9 @@ Use this to see whether any metric tracks MIA or accuracy **during** unlearning,
 - `gradient_ascent.pipelines.multitarget` re-exports both
 - `gradient_ascent.notebook_helpers.run_similarity_mia_correlation_from_notebook`
 - `gradient_ascent.notebook_helpers.run_epochwise_similarity_proxy_analysis_from_notebook`
+
+## References for rationale
+
+- Bourtoule et al. (2021), "Machine Unlearning", IEEE S&P, [https://doi.org/10.1109/SP40001.2021.00019](https://doi.org/10.1109/SP40001.2021.00019)  
+- Shokri et al. (2017), "Membership Inference Attacks Against Machine Learning Models", IEEE S&P, [https://doi.org/10.1109/SP.2017.41](https://doi.org/10.1109/SP.2017.41)  
+- Carlini et al. (2022), "Membership Inference Attacks From First Principles", IEEE S&P, [https://doi.org/10.1109/SP46214.2022.9833649](https://doi.org/10.1109/SP46214.2022.9833649)  

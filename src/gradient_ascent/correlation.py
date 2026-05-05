@@ -109,6 +109,10 @@ def compute_topk_layer_delta(
     named ``metric`` unless ``value_col`` is set.
 
     Returns a one-row DataFrame with diagnostics.
+
+    In addition to top-k means, this always reports the single-layer endpoint
+    change for the most-shifted layer (largest ``abs_delta``):
+    ``max_changed_layer_delta`` (signed) and ``max_changed_layer_abs_delta``.
     """
     if value_col is None:
         value_col = metric
@@ -153,6 +157,8 @@ def compute_topk_layer_delta(
                     "topk_mean_delta": np.nan,
                     "topk_mean_abs_delta": np.nan,
                     "max_abs_delta": np.nan,
+                    "max_changed_layer_delta": np.nan,
+                    "max_changed_layer_abs_delta": np.nan,
                     "start_epoch": np.nan,
                     "end_epoch": np.nan,
                     "n_layers_available": 0,
@@ -181,6 +187,8 @@ def compute_topk_layer_delta(
                 "topk_mean_delta": float(top["delta"].mean()),
                 "topk_mean_abs_delta": float(top["abs_delta"].mean()),
                 "max_abs_delta": float(stats_df["abs_delta"].max()),
+                "max_changed_layer_delta": float(stats_df["delta"].iloc[0]),
+                "max_changed_layer_abs_delta": float(stats_df["abs_delta"].iloc[0]),
                 "start_epoch": int(top["start_epoch"].iloc[0]),
                 "end_epoch": int(top["end_epoch"].iloc[0]),
                 "n_layers_available": int(len(stats_df)),
@@ -397,6 +405,8 @@ def build_similarity_mia_correlation_table(
                         "mia_value_col": resolved_mia_col,
                         "selected_layers": str(r["selected_layers"]),
                         "max_abs_delta": float(r["max_abs_delta"]),
+                        "max_changed_layer_delta": float(r["max_changed_layer_delta"]),
+                        "max_changed_layer_abs_delta": float(r["max_changed_layer_abs_delta"]),
                         "k": kk,
                         "mia_start": mia_stats["mia_start"],
                         "mia_end": mia_stats["mia_end"],
@@ -427,15 +437,22 @@ def compute_correlations(
 ) -> pd.DataFrame:
     """Pooled Pearson/Spearman correlations across all rows in the table.
 
-    One block of outputs per (reference, similarity_metric) with x features:
-    ``top2_mean_delta`` / ``top2_mean_abs_delta`` / ``max_abs_delta`` when present,
-    else ``topk_mean_delta`` / ``topk_mean_abs_delta`` / ``max_abs_delta``.
+    One block of outputs per (reference, similarity_metric). Preferred x feature
+    is ``max_changed_layer_delta`` (largest-|Δ| layer, signed). Legacy top-k
+    means are still included when present for backwards-compatible diagnostics.
     """
     if correlation_table.empty:
         return pd.DataFrame()
 
     out_rows: list[dict] = []
     x_candidates: list[tuple[str, str]] = []
+    if "max_changed_layer_delta" in correlation_table.columns:
+        x_candidates.extend(
+            [
+                ("max_changed_layer_delta", "max_changed_layer_delta"),
+                ("max_changed_layer_abs_delta", "max_changed_layer_abs_delta"),
+            ]
+        )
     if "top2_mean_delta" in correlation_table.columns:
         x_candidates.extend(
             [
@@ -867,7 +884,9 @@ def run_similarity_mia_correlation_analysis(
     paths: dict[str, Path] = {"table": table_csv, "summary": summary_csv}
 
     x_scatter_cols: list[str] = []
-    if top_k_layers == 2 and "top2_mean_delta" in table.columns:
+    if "max_changed_layer_delta" in table.columns:
+        x_scatter_cols.extend(["max_changed_layer_delta", "max_changed_layer_abs_delta"])
+    elif top_k_layers == 2 and "top2_mean_delta" in table.columns:
         x_scatter_cols.extend(["top2_mean_delta", "top2_mean_abs_delta"])
     else:
         x_scatter_cols.extend(["topk_mean_delta", "topk_mean_abs_delta"])
