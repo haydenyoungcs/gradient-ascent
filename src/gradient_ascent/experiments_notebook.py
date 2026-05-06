@@ -265,10 +265,55 @@ def _seed_frog_target_from_single_run(*, single_out: Path, multi_root: Path, tar
 @dataclass
 class MultitargetSectionConfig:
     run_similarity_stage: bool = True
-    reuse_trajectory_outputs: bool = True
+    reuse_trajectory_outputs: bool = False
     seed_frog_target_from_single_run: bool = True
     frog_target_label: int = 6
     similarity_data_mode: Literal["forget", "retain", "test"] = "forget"
+    clear_similarity_activation_cache: bool = True
+    clear_existing_similarity_outputs: bool = True
+
+
+def _clear_similarity_outputs_for_target(target_dir: Path) -> None:
+    """Delete per-target similarity/MIA trajectory outputs so reruns are guaranteed fresh."""
+    if not target_dir.exists():
+        return
+    for algo in ("ga", "ssd", "salun", "certified", "scrub"):
+        for ref in ("retrained", "original"):
+            prefix = target_dir / f"similarity_vs_unlearning_epoch_{algo}_vs_{ref}"
+            for suffix in (
+                ".csv",
+                "_summary.png",
+                "_evolving_bars.gif",
+                "_evolving_grouped_bars.gif",
+                "_before_after_grouped_bars.png",
+            ):
+                candidate = Path(f"{prefix}{suffix}")
+                if candidate.exists():
+                    candidate.unlink()
+        for suffix in (
+            ".csv",
+            ".png",
+        ):
+            candidate = target_dir / f"similarity_metric_timing_{algo}{suffix}"
+            if candidate.exists():
+                candidate.unlink()
+        for suffix in (
+            ".csv",
+            ".png",
+        ):
+            candidate = target_dir / f"mia_vs_unlearning_epoch_{algo}{suffix}"
+            if candidate.exists():
+                candidate.unlink()
+        for name in (
+            f"mia_frog_trajectory_{algo}.png",
+            f"mia_forget_vs_retain_logreg_mean_member_prob_{algo}.png",
+        ):
+            candidate = target_dir / name
+            if candidate.exists():
+                candidate.unlink()
+    baseline_csv = target_dir / "mia_retrained_baseline.csv"
+    if baseline_csv.exists():
+        baseline_csv.unlink()
 
 
 def experiments_section_multitarget(
@@ -288,6 +333,22 @@ def experiments_section_multitarget(
 
     if cfg.seed_frog_target_from_single_run:
         _seed_frog_target_from_single_run(single_out=single_out, multi_root=multi_root, target_label=cfg.frog_target_label)
+
+    if cfg.clear_similarity_activation_cache:
+        for target_label in range(10):
+            cache_dir = multi_root / f"target_{target_label}" / "similarity_activation_cache"
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+                print(f"Cleared activation cache: {cache_dir}")
+
+    if cfg.clear_existing_similarity_outputs:
+        for target_label in range(10):
+            target_dir = multi_root / f"target_{target_label}"
+            _clear_similarity_outputs_for_target(target_dir)
+        correlation_dir = multi_root / "correlation"
+        if correlation_dir.exists():
+            shutil.rmtree(correlation_dir)
+            print(f"Cleared prior correlation outputs: {correlation_dir}")
 
     similarity_setup = prepare_similarity_setup()
     multi_target_artifacts = run_multitarget_averaged_experiment(
@@ -350,7 +411,57 @@ def experiments_section_correlation(
     return {**paths_run, **{f"epochwise:{k}": v for k, v in paths_epoch.items()}}
 
 
+@dataclass
+class RefreshSimilarityCorrelationConfig:
+    """Refresh similarity/correlation from saved checkpoints without retraining models."""
+
+    similarity_data_mode: Literal["forget", "retain", "test"] = "forget"
+    seed_frog_target_from_single_run: bool = False
+    frog_target_label: int = 6
+    clear_similarity_activation_cache: bool = True
+    clear_existing_similarity_outputs: bool = True
+    references: tuple[str, ...] = ("retrained", "original")
+
+
+def experiments_refresh_similarity_and_correlation(
+    runtime: Any,
+    *,
+    out_dir: str,
+    wandb_module: Any,
+    config: Optional[RefreshSimilarityCorrelationConfig] = None,
+) -> tuple[MultiTargetAggregateArtifacts, dict[str, Path]]:
+    """Recompute similarity/MIA trajectories and correlation while reusing all saved checkpoints."""
+    cfg = config or RefreshSimilarityCorrelationConfig()
+
+    frozen_core_cfg = CoreSectionConfig(
+        reuse_existing_checkpoints=True,
+        reuse_original_checkpoint=True,
+        reuse_retrained_checkpoint=True,
+        reuse_unlearned_checkpoints=True,
+    )
+    multi_cfg = MultitargetSectionConfig(
+        run_similarity_stage=True,
+        reuse_trajectory_outputs=False,
+        seed_frog_target_from_single_run=cfg.seed_frog_target_from_single_run,
+        frog_target_label=cfg.frog_target_label,
+        similarity_data_mode=cfg.similarity_data_mode,
+        clear_similarity_activation_cache=cfg.clear_similarity_activation_cache,
+        clear_existing_similarity_outputs=cfg.clear_existing_similarity_outputs,
+    )
+    multi_target_artifacts = experiments_section_multitarget(
+        runtime,
+        out_dir=out_dir,
+        wandb_module=wandb_module,
+        core_config=frozen_core_cfg,
+        multitarget_config=multi_cfg,
+    )
+
+    correlation_paths = experiments_section_correlation(runtime, out_dir=out_dir)
+    return multi_target_artifacts, correlation_paths
+
+
 # Default section configs (edit attributes in-notebook if needed before calling).
 DEFAULT_CORE_CONFIG = CoreSectionConfig()
 DEFAULT_TRAJECTORY_CONFIG = TrajectorySectionConfig()
 DEFAULT_MULTITARGET_CONFIG = MultitargetSectionConfig()
+DEFAULT_REFRESH_SIMILARITY_CORRELATION_CONFIG = RefreshSimilarityCorrelationConfig()
