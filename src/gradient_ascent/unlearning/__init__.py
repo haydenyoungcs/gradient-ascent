@@ -1,4 +1,4 @@
-"""Unlearning baselines grouped by algorithm."""
+"""Unlearning baselines (one module per algorithm)."""
 
 from .certified import CertifiedConfig, run_certified_unlearning
 from .ga import GAConfig, run_ga_unlearning

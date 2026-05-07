@@ -14,13 +14,11 @@ from .common import _save_snapshot, _set_bn_eval
 
 @dataclass(frozen=True)
 class GAConfig:
-    """Pure gradient ascent on the forget set.
+    """Vanilla Gradient Ascent on the forget set.
 
-    Implements vanilla Gradient Ascent unlearning: a single SGD loop over the
-    forget loader where each step moves against the cross-entropy gradient. No
-    retain set is consulted. This is the definition used in e.g. Thudi et al.
-    (2022) and the NegGrad baseline of Golatkar et al. (2020); there is no
-    regularisation, no retain-side loss and no masking.
+    Each step moves *against* the cross-entropy gradient on forget data; the
+    retain set is never used. Matches the NegGrad / GA baselines in Thudi et al.
+    (2022) and Golatkar et al. (2020): no retain loss, regularisation, or mask.
     """
 
     lr: float = 3e-6
@@ -39,7 +37,7 @@ def run_ga_unlearning(
     num_classes: int = 10,
     snapshot_dir: Optional[str] = None,
 ):
-    """Vanilla Gradient Ascent unlearning on the forget set only."""
+    """Run plain Gradient Ascent unlearning on the forget loader."""
     config = config or GAConfig()
     amp = build_amp_config(device)
     criterion = nn.CrossEntropyLoss()

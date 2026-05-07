@@ -24,34 +24,19 @@ from .common import (
 class SCRUBConfig:
     """SCRUB: teacher-student approximate unlearning (Kurmanji et al., 2023).
 
-    This repository uses a clean adaptation of SCRUB's central idea rather than
-    a bit-for-bit recreation of the authors' notebook code. The original
-    trained model is copied and frozen as the teacher, while a student
-    initialised from the same checkpoint is updated to:
+    The original model is frozen as the teacher; a student copy is trained to
+    (1) stay close to the teacher on retain data via KL distillation and
+    cross-entropy, and (2) become uncertain on forget data by matching a
+    uniform distribution.
 
-    * stay close to the teacher on ``D_r`` via temperature-scaled KL
-      distillation plus optional retain-label cross-entropy; and
-    * move away from the teacher on ``D_f`` by making the student's logits
-      deliberately uninformative on forget examples.
-
-    To keep the implementation easy to compare with the existing baselines and
-    easy to explain in a dissertation, we use a paired-batch objective during a
-    short initial scrub phase: every forget batch is matched with a retain batch
-    and the update minimises
+    During the forget phase the per-batch loss is
 
     ``alpha * KL(student_r || teacher_r) + gamma * CE(student_r, y_r)
-      + beta * KL(U || student_f)``.
+      + beta * KL(U || student_f)``
 
-    Here ``U`` is the uniform class distribution. Using a uniform forget target
-    gives a more controlled "be uncertain on forgotten data" signal than a raw
-    negative teacher-KL term, which in practice can make the model latch onto an
-    arbitrary wrong class and produce erratic spikes in unrelated classes.
-
-    After that, the student enters a recovery phase where the forget term is
-    not removed entirely, but reduced sharply. This avoids the failure mode
-    where a single destructive scrub step is immediately undone by pure
-    retain-only training, while still keeping later epochs much more
-    retain-focused than the initial scrub phase.
+    where ``U`` is the uniform class distribution. After the forget phase, the
+    forget term is shrunk (not removed) so retain training can recover utility
+    without immediately undoing the scrub step.
     """
 
     lr: float = 5e-4
@@ -84,7 +69,7 @@ def _uniform_kl(student_logits: torch.Tensor, temperature: float) -> torch.Tenso
     log_probs_student = torch.log_softmax(student_logits / temperature, dim=1)
     num_classes = int(student_logits.shape[1])
     uniform_probs = torch.full_like(student_logits, 1.0 / float(num_classes))
-    # F.kl_div(log q, p) computes KL(p || q), so this is KL(U || student).
+    # F.kl_div(log q, p) returns KL(p || q), so this is KL(U || student).
     return torch.nn.functional.kl_div(log_probs_student, uniform_probs, reduction="batchmean") * (temperature ** 2)
 
 
@@ -99,7 +84,7 @@ def run_scrub_unlearning(
     snapshot_dir: Optional[str] = None,
     teacher_model: Optional[nn.Module] = None,
 ):
-    """SCRUB teacher-student unlearning adapted to this repository."""
+    """Run SCRUB unlearning: a forget phase on paired batches, then a retain-focused recovery phase."""
     config = config or SCRUBConfig()
     if retain_loader is None:
         raise ValueError("SCRUB requires a retain_loader.")
@@ -212,10 +197,7 @@ def run_scrub_unlearning(
                 retain_ce_sum += float(retain_ce.detach().item())
                 retain_batches += 1
 
-        # Keep recovery close to SCRUB's staged schedule: if a recovery forget
-        # signal is enabled, use only the paired loop above; otherwise, run a
-        # pure retain loop. This avoids over-weighting retain updates by running
-        # both loops in the same recovery epoch.
+        # During recovery, either keep paired updates or fall back to retain-only.
         if (not in_forget_phase) and (not run_paired_loop):
             for batch_idx, (retain_inputs, retain_labels) in enumerate(retain_loader):
                 if config.max_retain_batches_per_epoch is not None and batch_idx >= config.max_retain_batches_per_epoch:

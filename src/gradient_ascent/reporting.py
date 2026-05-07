@@ -14,11 +14,11 @@ def min_max_to_similarity_01(
     lower_is_more_similar: bool,
     range_from: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Map raw metric values to [0, 1] so 1 always means most similar and 0 least similar.
+    """Min–max scale to [0, 1] so 1 = most similar, 0 = least.
 
-    Min and max are taken from ``range_from`` when provided (e.g. all algorithms' epochs
-    pooled together); otherwise from ``values`` itself. For metrics where *smaller* raw
-    scores mean more similar (e.g. Euclidean distance, KL), set ``lower_is_more_similar=True``.
+    Range is taken from ``range_from`` if provided (useful for pooling across runs),
+    otherwise from ``values``. Set ``lower_is_more_similar=True`` for metrics like
+    Euclidean or KL where smaller is closer.
     """
     arr = np.asarray(values, dtype=np.float64)
     ref = np.asarray(range_from, dtype=np.float64) if range_from is not None else arr
@@ -51,12 +51,10 @@ def orient_epoch_rows_for_similarity(
     metric_names: Iterable[str],
     lower_better_metrics: Iterable[str],
 ) -> Sequence[Tuple[int, List[dict]]]:
-    """Return rows with every metric min–max rescaled to [0, 1], 1 = most similar in the set.
+    """Rescale every metric across the (epoch, layer) cells to [0, 1] with 1 = most similar.
 
-    Pooling is over all (epoch, layer) cells in ``epoch_rows`` for each metric, matching the
-    evolving bar plots and summary figures. Raw ``euclidean`` / ``kl_sym`` are distances or
-    divergences (lower = more similar); they are inverted so that, like CKA/CCA/cosine, a
-    rescaled value of 1 means best match seen in that comparison and 0 means worst.
+    Distance-like metrics (``euclidean``, ``kl_sym``) are inverted so they match
+    CKA/CCA/cosine after rescaling.
     """
     metric_names = list(metric_names)
     lower_better_metrics = set(lower_better_metrics)

@@ -70,7 +70,7 @@ def display_similarity_epoch_slider(
     metric_names: list[str],
     lower_better_metrics: list[str],
 ) -> None:
-    """Display an interactive slider to scrub similarity epochs in-notebook."""
+    """Render an in-notebook slider that scrubs through similarity epochs."""
     from IPython.display import clear_output, display
     import ipywidgets as widgets
 
@@ -166,9 +166,8 @@ def build_default_core_config(
     out_dir: str = "out",
     use_bf16: bool = False,
 ) -> CoreExperimentConfig:
-    """Return the notebook's default baseline configuration bundle."""
-    # Keep GA close to the naive forget-only baseline: full passes over the
-    # forget loader, no BatchNorm freezing, and no gradient clipping.
+    """Build the default notebook baseline: per-algorithm hyperparameters bundled together."""
+    # GA: plain ascent over the full forget loader.
     ga_config = GAConfig(
         lr=1.1e-4,
         epochs=6,
@@ -176,9 +175,7 @@ def build_default_core_config(
         freeze_bn=False,
         grad_clip_norm=None,
     )
-    # SSD was previously over-aggressive and expensive in this notebook setup.
-    # These defaults trade a bit of forgetting strength for much lower runtime
-    # and substantially less collateral damage on non-forgotten classes.
+    # SSD defaults are tuned for stable runtime and modest retain-class damage.
     ssd_config = SSDConfig(
         alpha=8.0,
         lambda_=0.9,
@@ -188,10 +185,7 @@ def build_default_core_config(
         selection_basis="retain",
         fisher_mode="batch",
     )
-    # SCRUB preset tuned to keep frog forgetting stronger late in training:
-    # - more forget batches in the scrub phase,
-    # - non-trivial residual forget pressure in recovery,
-    # - lower retain CE weight so recovery does not quickly relearn frogs.
+    # SCRUB preset: keep some forget pressure during the recovery phase.
     scrub_config = SCRUBConfig(
         lr=5e-5,
         epochs=6,
@@ -329,7 +323,7 @@ def run_notebook_trajectory_experiment(
     wandb_project: str = "gradient-ascent",
     wandb_name: str = "unlearning-algorithm-comparison",
 ) -> tuple[TrajectoryExperimentArtifacts, object]:
-    """Run the notebook's full trajectory/MIA/similarity pipeline."""
+    """Run the full trajectory/MIA/similarity pipeline from the notebook."""
     trajectory_config = replace(build_default_trajectory_config(runtime), similarity_data_mode=similarity_data_mode)
     similarity_setup = similarity_setup_with_trajectory_cca(similarity_setup, trajectory_config)
     wandb_run = ensure_wandb_run(wandb_module, project=wandb_project, name=wandb_name)
@@ -394,7 +388,7 @@ def save_notebook_combined_comparison(
     wandb_project: str = "gradient-ascent",
     wandb_name: str = "unlearning-algorithm-comparison",
 ) -> str:
-    """Build the combined cross-algorithm similarity + MIA figure."""
+    """Save the combined similarity + MIA comparison figure across algorithms."""
     wandb_run = ensure_wandb_run(wandb_module, project=wandb_project, name=wandb_name)
     return save_combined_trajectory_comparison(
         CombinedComparisonConfig(out_dir=runtime.out_dir),
@@ -411,13 +405,10 @@ def run_and_display_notebook_core_pipeline(
     reuse_unlearned_checkpoints: Optional[bool] = None,
     run_diagnostics: bool = True,
 ):
-    """Run the full core experiment and render notebook outputs inline.
+    """Run the core experiment and display every figure inline.
 
-    This helper keeps notebook cells compact by wrapping:
-    - core checkpoint/original/retrained training,
-    - all five unlearning baselines,
-    - runtime and summary prints,
-    - optional GA/SCRUB diagnostic exports and plots.
+    Wraps original/retrained training, all five unlearning baselines, runtime
+    summaries, and (optionally) GA/SCRUB diagnostic plots.
     """
     from IPython.display import Image as IPyImage, display
 
@@ -479,7 +470,7 @@ def run_and_display_notebook_trajectory_pipeline(
     similarity_data_mode: Literal["forget", "retain", "test"] = "forget",
     wandb_module=None,
 ):
-    """Run trajectory/MIA/similarity analysis and display all generated figures."""
+    """Run trajectory/MIA/similarity analysis and display every figure inline."""
     from IPython.display import Image as IPyImage, clear_output, display
     import ipywidgets as widgets
 
@@ -530,7 +521,7 @@ def run_and_display_notebook_trajectory_pipeline(
 
 
 def run_and_display_notebook_combined_comparison(runtime: NotebookRuntime, wandb_module=None) -> str:
-    """Generate and display the combined cross-algorithm comparison figure."""
+    """Build and show the combined cross-algorithm comparison figure."""
     from IPython.display import Image as IPyImage, display
 
     combined_path = save_notebook_combined_comparison(runtime, wandb_module=wandb_module)
@@ -545,12 +536,10 @@ def run_similarity_mia_correlation_from_notebook(
     multitarget_aggregate_dir: Optional[str] = None,
     **kwargs,
 ) -> dict[str, Path]:
-    """Correlate scalar similarity movement with MIA reduction using saved multitarget CSVs.
+    """Run-level similarity-vs-MIA correlation using saved multitarget CSVs.
 
-    Defaults to ``<runtime.out_dir>/multitarget_aggregate``, matching
-    ``run_multitarget_averaged_experiment``. Pass ``multitarget_aggregate_dir`` after a
-    custom ``out_dir`` there. Extra keyword arguments are forwarded to
-    ``run_similarity_mia_correlation_analysis``.
+    Defaults to ``<runtime.out_dir>/multitarget_aggregate``. Extra kwargs are
+    forwarded to ``run_similarity_mia_correlation_analysis``.
     """
     base = Path(multitarget_aggregate_dir or os.path.join(runtime.out_dir, "multitarget_aggregate"))
     return run_similarity_mia_correlation_analysis(base, **kwargs)
@@ -562,10 +551,9 @@ def run_epochwise_similarity_proxy_analysis_from_notebook(
     multitarget_aggregate_dir: Optional[str] = None,
     **kwargs,
 ) -> dict[str, Path]:
-    """At each unlearning step, correlate layer-mean similarity with MIA and accuracy across runs.
+    """Per-step cross-run correlation of layer-mean similarity with MIA / accuracy.
 
     Forwards to ``run_epochwise_similarity_outcome_correlation`` on the multitarget root.
-    Typical kwargs: ``references=("retrained", "original")``, ``min_n=15``.
     """
     base = Path(multitarget_aggregate_dir or os.path.join(runtime.out_dir, "multitarget_aggregate"))
     return run_epochwise_similarity_outcome_correlation(base, **kwargs)

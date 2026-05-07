@@ -1,4 +1,4 @@
-"""Notebook-facing runtime and similarity configuration (no IPython / pipeline orchestration)."""
+"""Lightweight runtime + similarity config used by the notebook (no IPython imports here)."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class SimilaritySetup:
 
 
 def build_core_wandb_config(config: CoreExperimentConfig) -> dict[str, object]:
-    """Flatten core experiment settings for Weights & Biases run config."""
+    """Flatten the core config into a flat dict for the Weights & Biases run."""
     return {
         "target_label": config.target_label,
         "num_epochs": config.num_epochs,
@@ -78,7 +78,7 @@ def similarity_setup_with_trajectory_cca(
     setup: SimilaritySetup,
     trajectory_config: TrajectoryExperimentConfig,
 ) -> SimilaritySetup:
-    """Align the CCA object with trajectory speed settings (single knob in the notebook)."""
+    """Sync the CCA object with the trajectory's column-cap settings."""
     metrics = dict(setup.metrics)
     metrics["cca"] = CCA(
         max_columns=trajectory_config.cca_max_columns,

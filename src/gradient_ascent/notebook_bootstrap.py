@@ -22,11 +22,7 @@ def bootstrap_notebook_environment(
     github_token: str | None = None,
     wandb_api_key: str | None = None,
 ) -> NotebookBootstrapResult:
-    """Prepare notebook runtime for local and Colab execution.
-
-    The helper intentionally keeps setup imperative and explicit so it stays
-    easy to audit in a dissertation appendix.
-    """
+    """Set up the notebook runtime for local or Colab use (paths, repo clone, pip install, wandb)."""
     in_colab = False
     try:
         from google.colab import drive, userdata  # type: ignore

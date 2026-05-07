@@ -17,17 +17,15 @@ def _cca_subsample_columns(
     max_columns: Optional[int],
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Reduce feature dimension before QR when d is large (same idea as SVCCA-style subsampling)."""
+    """Sub-sample feature columns before QR (SVCCA-style speed-up for wide layers)."""
     if max_columns is None:
         return x, y
-    # If feature widths match, use a shared index set so identical activations
-    # (e.g. step-0 snapshots) keep the CCA identity behavior.
+    # When widths match, use the same column indices so activations stay aligned.
     if x.shape[1] == y.shape[1] and x.shape[1] > max_columns:
         rng = np.random.RandomState(seed)
         idx = rng.choice(x.shape[1], size=max_columns, replace=False)
         return x[:, idx], y[:, idx]
 
-    # Fallback for unequal widths: deterministic but independent index sets.
     rng_x = np.random.RandomState(seed)
     rng_y = np.random.RandomState(seed + 7919)
     if x.shape[1] > max_columns:
@@ -131,7 +129,7 @@ def prepare_activations_for_evaluation(
     subsample_seed: int = 42,
     precompute_metric_reference_cache: bool = False,
 ) -> Dict[str, Dict[str, object]]:
-    """Precompute reusable per-layer transforms for repeated similarity calls."""
+    """Precompute per-layer transforms once so repeated similarity calls are cheap."""
     metrics = metrics or build_default_metrics()
     layer_list = list(layers)
     idx = _build_activation_index(acts, layer_list, max_activation_samples, subsample_seed)
@@ -184,7 +182,7 @@ class CCA:
         qy, _ = np.linalg.qr(y, mode="reduced")
 
         try:
-            # Singular values only: avoids O(min^3) work to build full U,V (LAPACK path).
+            # Singular values only — no need to build the U/V factors.
             correlations = np.linalg.svd(qx.T @ qy, compute_uv=False)
             correlations = np.clip(correlations, 0, 1)
             correlations = correlations[:slice_cap]
@@ -251,12 +249,10 @@ class CCA:
 
 
 def linear_cka_doubly_centered_gram(x: np.ndarray, y: np.ndarray) -> float:
-    """Linear CKA with the same doubly-centered Gram definition as the legacy path.
+    """Linear CKA via the Frobenius form from Kornblith et al. (2019).
 
-    Uses the Frobenius formulation from Kornblith et al. (2019), "Similarity of Neural
-    Network Representations Revisited" (arXiv:1905.00414), avoiding materialising the
-    n×n Gram matrices ``x @ x.T`` and ``y @ y.T``. Rows of ``x`` and ``y`` must be paired
-    (same batch order). Complexity is O(n d_x d_y + n d_x^2 + n d_y^2) instead of O(n^2 d).
+    Avoids building the full n×n Gram matrices, so it's cheaper when n is large.
+    Rows of ``x`` and ``y`` must come from the same batch order.
     """
     xc = x - x.mean(axis=0, keepdims=True)
     yc = y - y.mean(axis=0, keepdims=True)
@@ -460,8 +456,7 @@ def collect_model_activations(
         def hook(_module, _inputs, output):
             if isinstance(output, (tuple, list)):
                 output = output[0]
-            # Reduce spatial dimensions on-device before host transfer to avoid
-            # copying large N x C x H x W tensors over PCIe each batch.
+            # Pool spatial dims on-device to keep CPU transfers small.
             out = output.detach()
             if out.ndim > 2:
                 out = out.mean(dim=tuple(range(2, out.ndim)))
@@ -557,7 +552,7 @@ def evaluate_pair_rows_prepared(
     metrics: Optional[Dict[str, object]] = None,
     metric_timing_seconds: Optional[Dict[str, float]] = None,
 ) -> List[dict]:
-    """Evaluate similarity using precomputed activation transforms for both sides."""
+    """Score similarity using precomputed activation transforms for both models."""
     metrics = metrics or build_default_metrics()
     layer_list = list(layers)
     rows = []
@@ -616,7 +611,7 @@ _ROW_METADATA_KEYS = frozenset({"layer", "n_samples", "n_features", "epoch"})
 
 
 def transform_rows_for_plot(rows: List[dict], lower_better_metrics: Iterable[str] = LOWER_BETTER_METRICS) -> List[dict]:
-    """Min–max each metric across ``rows`` (typically one step's layers) to [0, 1], 1 = most similar."""
+    """Min–max each metric across ``rows`` to [0, 1] so 1 = most similar."""
     lower = set(lower_better_metrics)
     transformed = [{k: v for k, v in row.items()} for row in rows]
     if not rows:

@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from ..data import (
+    CIFAR10_CLASSES,
     clone_dataset_with_eval_transform,
     make_forget_retain_subsets,
     make_loader,
@@ -289,8 +290,7 @@ def run_trajectory_analysis(
 
     t0 = time.perf_counter()
     forget_subset, _retain_subset = make_forget_retain_subsets(trainset, config.target_label)
-    # MIA should probe fixed member/non-member distributions. Use an eval-view of
-    # the train dataset so member examples are not randomly augmented each pass.
+    # Deterministic train-set view (no augmentation) for MIA member probes.
     mia_trainset = clone_dataset_with_eval_transform(trainset)
     forget_member_subset, forget_nonmember_subset, forget_n_member, forget_n_nonmember = sample_class_subsets(
         mia_trainset,
@@ -324,10 +324,20 @@ def run_trajectory_analysis(
         num_workers,
         use_cuda,
     )
+    if 0 <= int(config.target_label) < len(CIFAR10_CLASSES):
+        forget_label_desc = f"label={config.target_label} ({CIFAR10_CLASSES[int(config.target_label)]})"
+    else:
+        forget_label_desc = f"label={config.target_label}"
+    if 0 <= int(config.retain_control_label) < len(CIFAR10_CLASSES):
+        retain_label_desc = (
+            f"label={config.retain_control_label} ({CIFAR10_CLASSES[int(config.retain_control_label)]})"
+        )
+    else:
+        retain_label_desc = f"label={config.retain_control_label}"
     print(
         f"MIA probes ready | balanced={config.mia_balance_probe_classes} | "
-        f"forget(frog={config.target_label}): {forget_n_member} member + {forget_n_nonmember} non-member | "
-        f"retain(label={config.retain_control_label}): {retain_n_member} member + {retain_n_nonmember} non-member"
+        f"forget({forget_label_desc}): {forget_n_member} member + {forget_n_nonmember} non-member | "
+        f"retain({retain_label_desc}): {retain_n_member} member + {retain_n_nonmember} non-member"
     )
     stage_timing_seconds["prepare_mia_subsets_and_loaders"] = time.perf_counter() - t0
     print(

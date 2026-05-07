@@ -14,10 +14,7 @@ DEFAULT_LAYER_NAMES = (
 
 
 class Net(nn.Module):
-    """
-    ResNet adapted for CIFAR-10 (32x32) by using a 3x3 stride-1 conv
-    and removing the initial maxpool.
-    """
+    """ResNet adapted for CIFAR-10: 3x3 stride-1 first conv and no initial maxpool."""
 
     def __init__(self, num_classes: int = 10, pretrained: bool = False, model_depth: int = 50):
         super().__init__()

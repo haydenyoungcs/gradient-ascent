@@ -1,7 +1,4 @@
-"""Thin drivers for `notebooks/experiments.ipynb` — keep the notebook narrative-only.
-
-All imperative setup and section pipelines live here so the notebook stays short.
-"""
+"""Section drivers for `notebooks/experiments.ipynb` — all imperative code lives here so the notebook stays narrative-only."""
 
 from __future__ import annotations
 
@@ -38,7 +35,7 @@ def _find_project_root_from_cwd() -> Path | None:
 
 
 def experiments_bootstrap() -> ExperimentsBootstrapContext:
-    """Colab/local path setup, optional clone, then `bootstrap_notebook_environment` (pip, wandb)."""
+    """Set up paths, clone the repo if needed, install deps, and log into wandb."""
     github_token = os.environ.get("GITHUB_TOKEN")
     wandb_api_key = os.environ.get("WANDB_API_KEY")
     in_colab = False
@@ -107,10 +104,7 @@ def experiments_section_core(
     wandb_module: Any,
     config: Optional[CoreSectionConfig] = None,
 ) -> tuple[Any, Any, CoreSectionConfig]:
-    """Section 1 — original/retrain/unlearn checkpoints and optional diagnostics.
-
-    Returns the ``CoreSectionConfig`` instance that was applied so Section 4 can reuse reuse flags.
-    """
+    """Section 1 — original / retrained / unlearned checkpoints (plus optional diagnostics)."""
     import warnings
 
     from .notebook_helpers import prepare_notebook_runtime, run_and_display_notebook_core_pipeline
@@ -147,7 +141,7 @@ def experiments_section_trajectory(
     wandb_module: Any,
     config: Optional[TrajectorySectionConfig] = None,
 ) -> tuple[Any, Any, Any]:
-    """Section 2 — similarity + MIA trajectories for all baselines."""
+    """Section 2 — similarity and MIA trajectories for every baseline."""
     from .notebook_helpers import prepare_similarity_setup, run_and_display_notebook_trajectory_pipeline
 
     cfg = config or TrajectorySectionConfig()
@@ -163,14 +157,14 @@ def experiments_section_trajectory(
 
 
 def experiments_section_combined(runtime: Any, *, wandb_module: Any) -> str:
-    """Section 3 — single overlay figure."""
+    """Section 3 — overlay similarity and MIA across algorithms in one figure."""
     from .notebook_helpers import run_and_display_notebook_combined_comparison
 
     return run_and_display_notebook_combined_comparison(runtime, wandb_module=wandb_module)
 
 
 def _seed_frog_target_from_single_run(*, single_out: Path, multi_root: Path, target_label: int = 6) -> None:
-    """Optional: copy prior single-output-dir artefacts into ``target_<label>/`` for reuse."""
+    """Copy artefacts from a prior single-target run into ``target_<label>/`` so they can be reused."""
     shared_dir = multi_root / "shared"
     shared_dir.mkdir(parents=True, exist_ok=True)
     shared_original = shared_dir / "original_net.pt"
@@ -274,7 +268,7 @@ class MultitargetSectionConfig:
 
 
 def _clear_similarity_outputs_for_target(target_dir: Path) -> None:
-    """Delete per-target similarity/MIA trajectory outputs so reruns are guaranteed fresh."""
+    """Delete per-target similarity/MIA outputs so the next run starts fresh."""
     if not target_dir.exists():
         return
     for algo in ("ga", "ssd", "salun", "certified", "scrub"):
@@ -324,7 +318,7 @@ def experiments_section_multitarget(
     core_config: CoreSectionConfig,
     multitarget_config: Optional[MultitargetSectionConfig] = None,
 ) -> MultiTargetAggregateArtifacts:
-    """Section 4 — optional frog seeding + forget-label sweep and aggregates."""
+    """Section 4 — forget-label sweep across all classes plus aggregate plots."""
     from .notebook_helpers import prepare_similarity_setup, run_multitarget_averaged_experiment
 
     cfg = multitarget_config or MultitargetSectionConfig()
@@ -383,7 +377,7 @@ def experiments_section_correlation(
     *,
     out_dir: str,
 ) -> dict[str, Path]:
-    """Section 5 — run-level and epoch-wise similarity vs MIA/accuracy correlations."""
+    """Section 5 — run-level and per-step similarity-vs-MIA/accuracy correlations."""
     from .notebook_helpers import (
         run_epochwise_similarity_proxy_analysis_from_notebook,
         run_similarity_mia_correlation_from_notebook,
@@ -413,7 +407,7 @@ def experiments_section_correlation(
 
 @dataclass
 class RefreshSimilarityCorrelationConfig:
-    """Refresh similarity/correlation from saved checkpoints without retraining models."""
+    """Settings for refreshing similarity/correlation from saved checkpoints (no retraining)."""
 
     similarity_data_mode: Literal["forget", "retain", "test"] = "forget"
     seed_frog_target_from_single_run: bool = False
@@ -430,7 +424,7 @@ def experiments_refresh_similarity_and_correlation(
     wandb_module: Any,
     config: Optional[RefreshSimilarityCorrelationConfig] = None,
 ) -> tuple[MultiTargetAggregateArtifacts, dict[str, Path]]:
-    """Recompute similarity/MIA trajectories and correlation while reusing all saved checkpoints."""
+    """Recompute similarity/MIA + correlation from saved checkpoints (no retraining)."""
     cfg = config or RefreshSimilarityCorrelationConfig()
 
     frozen_core_cfg = CoreSectionConfig(
@@ -460,7 +454,7 @@ def experiments_refresh_similarity_and_correlation(
     return multi_target_artifacts, correlation_paths
 
 
-# Default section configs (edit attributes in-notebook if needed before calling).
+# Default configs used by the notebook sections.
 DEFAULT_CORE_CONFIG = CoreSectionConfig()
 DEFAULT_TRAJECTORY_CONFIG = TrajectorySectionConfig()
 DEFAULT_MULTITARGET_CONFIG = MultitargetSectionConfig()

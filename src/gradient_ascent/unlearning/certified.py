@@ -1,10 +1,7 @@
-"""Last-layer certified data removal.
+"""Last-layer certified data removal (Guo et al., 2020).
 
-Implements the non-convex adaptation of certified removal from Guo, Goldstein,
-Hannun & van der Maaten (2020), *Certified Data Removal from Machine Learning
-Models* (ICML 2020). Because ResNet-50 is non-convex, we freeze the feature
-extractor ``phi`` and treat the final linear classifier as a convex softmax
-regression head.
+ResNet-50 is non-convex, so we freeze the feature extractor and only certify
+the final linear classifier, which is a convex softmax regression problem.
 """
 
 from __future__ import annotations
@@ -25,7 +22,7 @@ from .common import _save_snapshot
 
 @dataclass(frozen=True)
 class CertifiedConfig:
-    """Hyperparameters for last-layer certified unlearning."""
+    """Settings for last-layer certified removal (refit + influence correction + optional noise)."""
 
     l2_reg: float = 1e-3
     feature_clip: float = 1.0
@@ -40,7 +37,7 @@ class CertifiedConfig:
 
 
 def _get_linear_head(model: nn.Module) -> nn.Linear:
-    """Return the final linear layer of ``Net`` (``model.model.fc``)."""
+    """Return the model's final linear layer (``model.model.fc``)."""
     inner = getattr(model, "model", model)
     head = getattr(inner, "fc", None)
     if not isinstance(head, nn.Linear):
@@ -56,7 +53,7 @@ def _extract_penultimate_features(
     loader,
     device: torch.device,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Return ``(features, labels)`` by replacing the head with Identity."""
+    """Forward inputs through the backbone and collect penultimate features."""
     inner = getattr(model, "model", model)
     original_fc = inner.fc
     inner.fc = nn.Identity()
@@ -78,7 +75,7 @@ def _extract_penultimate_features(
 
 
 def _clip_feature_norms(features: torch.Tensor, feature_clip: float) -> torch.Tensor:
-    """Row-wise rescale so that ``||features[i]||_2 <= feature_clip``."""
+    """Rescale each row so its L2 norm is at most ``feature_clip``."""
     if feature_clip <= 0.0:
         raise ValueError(f"feature_clip must be positive, got {feature_clip}")
     norms = features.norm(dim=1, keepdim=True).clamp(min=1e-12)
@@ -195,7 +192,7 @@ def _conjugate_gradient(
     max_iter: int,
     tol: float,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Solve ``H @ x = rhs`` for symmetric positive-definite ``H`` via CG."""
+    """Solve ``H x = rhs`` via conjugate gradients (``H`` is SPD; only the matvec is needed)."""
     x_W = torch.zeros_like(rhs_W)
     x_b = torch.zeros_like(rhs_b)
     r_W = rhs_W.clone()
@@ -258,7 +255,7 @@ def run_certified_unlearning(
     num_classes: int = 10,
     snapshot_dir: Optional[str] = None,
 ) -> dict:
-    """Last-layer certified data removal (Guo et al., 2020)."""
+    """Run last-layer certified removal: refit on ``D``, then apply an influence correction."""
     config = config or CertifiedConfig()
     print("[Certified] starting unlearning (last-layer certified removal)")
 

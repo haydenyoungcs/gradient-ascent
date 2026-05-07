@@ -12,7 +12,7 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Dataset, Subset
 
 
-# Same file as torchvision.datasets.CIFAR10 (see torchvision/datasets/cifar.py); mirrors must match tgz_md5.
+# Mirrors of the same CIFAR-10 archive that torchvision uses.
 DEFAULT_CIFAR10_ARCHIVE_URLS: Tuple[str, ...] = (
     "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz",
     "https://data.brainchip.com/dataset-mirror/cifar10/cifar-10-python.tar.gz",
@@ -54,7 +54,7 @@ def cifar10_transform(train: bool = False) -> transforms.Compose:
 def _resolve_cifar10_download_urls(
     explicit: Optional[Sequence[str]],
 ) -> Tuple[str, ...]:
-    """Pick download URLs: explicit argument, then env, then built-in defaults."""
+    """Pick download URLs from the argument, env var, or built-in defaults."""
     if explicit is not None:
         return tuple(explicit)
     env = os.environ.get("GRADIENT_ASCENT_CIFAR10_URLS", "").strip()
@@ -72,14 +72,10 @@ def load_cifar10_datasets(
     download_retry_max_delay_sec: float = 120.0,
     download_urls: Optional[Sequence[str]] = None,
 ) -> Tuple[Dataset, Dataset]:
-    """Load CIFAR-10 train/test sets.
+    """Load CIFAR-10 train/test sets, retrying with backoff if a download fails.
 
-    When ``download=True``, the first run may fetch archives from the network.
-    Transient failures (HTTP 503, timeouts, etc.) are retried with exponential backoff.
-
-    Default URLs: canonical Toronto, then Brainchip mirror, then Azure ML examples blob.
-    All must be the same ``cifar-10-python.tar.gz`` as torchvision.
-    Override order via ``download_urls=`` or env ``GRADIENT_ASCENT_CIFAR10_URLS`` (comma-separated).
+    Mirrors are tried in order; override with ``download_urls=`` or the
+    ``GRADIENT_ASCENT_CIFAR10_URLS`` env var (comma-separated).
     """
     retryable = (HTTPError, URLError, TimeoutError, ConnectionError)
     urls = _resolve_cifar10_download_urls(download_urls)
@@ -126,7 +122,6 @@ def load_cifar10_datasets(
                     )
                     time.sleep(delay)
 
-            # This mirror exhausted retries; try next URL if any.
             if mirror_idx < len(urls) - 1 and download:
                 print(
                     "[gradient_ascent] Switching to next CIFAR-10 mirror after repeated failures.",
@@ -149,11 +144,10 @@ def load_cifar10_datasets(
 
 
 def clone_dataset_with_eval_transform(dataset: Dataset) -> Dataset:
-    """Return a shallow dataset clone that uses deterministic eval transforms.
+    """Shallow-clone a dataset with deterministic eval transforms.
 
-    This is used by MIA probes so member examples are evaluated without random
-    train-time augmentation (crop/flip), making member/non-member comparisons
-    more stable and easier to interpret.
+    Used by MIA probes so members are evaluated without train-time augmentation,
+    keeping member/non-member comparisons stable.
     """
     if isinstance(dataset, Subset):
         cloned_parent = clone_dataset_with_eval_transform(dataset.dataset)

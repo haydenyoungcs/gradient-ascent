@@ -1,4 +1,4 @@
-"""Forget-label sweep: train/retrain/unlearn per class, then average metrics (dissertation macro view)."""
+"""Forget-label sweep: run each class separately, then average results across classes."""
 
 from __future__ import annotations
 
@@ -386,11 +386,10 @@ def run_multitarget_averaged_experiment(
     similarity_data_mode: Literal["forget", "retain", "test"] = "forget",
     shared_original_checkpoint_path: Optional[str] = None,
 ) -> MultiTargetAggregateArtifacts:
-    """Run forget-label sweeps (default 0..9) and build averaged utility/similarity plots.
+    """Sweep over forget labels (default 0..9) and produce averaged utility/similarity/MIA outputs.
 
-    Multi-target runs are forced to use one shared original checkpoint. If the
-    shared checkpoint is missing, this function raises instead of retraining an
-    original model.
+    All targets share one pretrained "original" checkpoint; the function fails
+    fast if it can't find one (no implicit retraining).
     """
     labels = target_labels or list(range(runtime.num_classes))
     aggregate_out_dir = out_dir or os.path.join(runtime.out_dir, "multitarget_aggregate")
@@ -455,7 +454,7 @@ def run_multitarget_averaged_experiment(
             num_workers=runtime.num_workers,
             config=target_core_config,
             reuse_existing_checkpoints=reuse_existing_checkpoints,
-            # Never retrain originals in multi-target mode.
+            # Always reuse the shared original checkpoint here.
             reuse_original_checkpoint=True,
             reuse_retrained_checkpoint=reuse_retrained_checkpoint,
             reuse_unlearned_checkpoints=reuse_unlearned_checkpoints,

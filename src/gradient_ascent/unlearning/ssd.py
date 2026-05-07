@@ -16,27 +16,18 @@ from .common import _loader_dataset_size, _save_snapshot
 class SSDConfig:
     """Selective Synaptic Dampening (Foster, Schoepf & Brintrup, 2023).
 
-    One-shot post-hoc dampening: for each parameter theta_i whose forget-set Fisher
-    dominates the reference Fisher (``I_forget(theta_i) > alpha * I_ref(theta_i)``), apply
-    ``theta_i <- beta_i * theta_i`` with ``beta_i = min(1, lambda * I_ref(theta_i) / I_forget(theta_i))``.
-    The paper performs this once; there is no fine-tuning step afterwards, so
-    the returned trajectory contains exactly two steps (pre- and post-
-    dampening).
+    One-shot dampening: for each weight whose forget-set Fisher dominates the
+    reference Fisher (``I_forget > alpha * I_ref``), shrink it by
+    ``beta = min(1, lambda * I_ref / I_forget)``. There is no fine-tuning, so
+    the trajectory has just two steps (before and after dampening).
 
-    ``selection_basis`` chooses what ``I_ref`` is:
+    ``selection_basis`` decides what ``I_ref`` is:
 
-    * ``"retain"`` (default) computes the reference Fisher on ``D_r`` only.
-      This is the canonical interpretation of "weights that are
-      disproportionately important for the forget set vs. everything else we
-      want to keep" and, crucially, makes ``alpha`` interpretable independently
-      of the forget ratio. With the convex-combination form below, the
-      selection condition ``I_f > alpha * (p I_f + (1-p) I_r)`` reduces to
-      ``(1 - alpha p) I_f > alpha (1-p) I_r``; for any forget ratio ``p >= 1/alpha`` no
-      parameter can ever be selected, which yields a no-op SSD pass.
-    * ``"union"`` reproduces the Foster et al. reference implementation, where
-      ``I_ref`` is the per-sample Fisher over ``D = D_f U D_r``. This is a
-      good approximation of ``I_retain`` when ``|D_f| << |D|`` but is
-      pathological at the 10% forget ratios used here.
+    * ``"retain"`` (default): Fisher on the retain set only. Makes ``alpha``
+      interpretable regardless of the forget/retain split.
+    * ``"union"``: Fisher on the full dataset, matching the reference
+      implementation. Good when ``|D_f| << |D|``, but breaks down at the ~10%
+      forget ratios used here.
     """
 
     alpha: float = 10.0
@@ -131,7 +122,7 @@ def _estimate_ssd_fishers(
     selection_basis: str = "retain",
     fisher_mode: str = "batch",
 ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
-    """Return ``(I_forget, I_ref)`` where ``I_ref`` is the reference Fisher."""
+    """Estimate ``(I_forget, I_ref)`` according to ``selection_basis``."""
     max_forget_batches = min(fisher_batches, len(forget_loader))
     max_retain_batches = min(fisher_batches, len(retain_loader))
     fisher_forget = estimate_empirical_fisher_diag(
@@ -177,7 +168,7 @@ def _apply_ssd_dampening(
     fisher_ref: Dict[str, torch.Tensor],
     config: SSDConfig,
 ) -> Dict[str, float]:
-    """Apply the SSD selection-and-dampening rule from Foster et al. (2023)."""
+    """Apply the SSD selection rule and shrink the chosen weights."""
     total_params = 0
     changed_params = 0
     mean_damp_sum = 0.0
@@ -223,7 +214,7 @@ def run_ssd_unlearning(
     num_classes: int = 10,
     snapshot_dir: Optional[str] = None,
 ):
-    """One-shot Selective Synaptic Dampening as specified in Foster et al. (2023)."""
+    """Run SSD: estimate Fishers, then apply the dampening rule once."""
     config = config or SSDConfig()
     criterion = nn.CrossEntropyLoss()
     print("[SSD] starting unlearning (one-shot Fisher dampening)")

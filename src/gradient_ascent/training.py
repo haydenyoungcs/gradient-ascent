@@ -34,7 +34,7 @@ def build_amp_config(device: torch.device) -> AmpConfig:
 
 
 def build_grad_scaler(device: torch.device, enabled: bool) -> torch.amp.GradScaler:
-    """Construct a GradScaler using the non-deprecated torch.amp API."""
+    """Build a GradScaler using the current torch.amp API."""
     if device.type == "cuda":
         return torch.amp.GradScaler("cuda", enabled=enabled)
     return torch.amp.GradScaler("cpu", enabled=False)
@@ -101,8 +101,7 @@ def train_model(
     optimizer = optim.SGD(net.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
     scheduler = None
     if lr_milestones is None:
-        # Provide a simple default schedule for the original/retrain runs:
-        # drop LR halfway and again at 75% of training.
+        # Default: drop the LR at 50% and 75% of training.
         lr_milestones = sorted({num_epochs // 2, (3 * num_epochs) // 4})
         lr_milestones = [m for m in lr_milestones if 0 < m < num_epochs]
     if lr_milestones:

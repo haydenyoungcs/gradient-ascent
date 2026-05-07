@@ -20,7 +20,7 @@ from gradient_ascent.correlation import (
 
 class TopkLayerDeltaTest(unittest.TestCase):
     def test_topk_picks_largest_abs_delta(self) -> None:
-        # Two epochs, three layers; cosine already "oriented" in [0,1] style for the test.
+        # Three layers, two epochs, cosine values already oriented.
         df = pd.DataFrame(
             [
                 {"epoch": 0, "layer": "a", "n_samples": 1, "n_features": 1, "cosine": 0.5},
@@ -32,9 +32,9 @@ class TopkLayerDeltaTest(unittest.TestCase):
             ]
         )
         out = compute_topk_layer_delta(df, "cosine", k=2)
-        # |Δ| ranks: b=0.7, a=0.1, c=0.05 → deterministic tie-break uses layer name (mergesort).
+        # |delta|: b=0.7, a=0.1, c=0.05 — ties broken by layer name.
         self.assertEqual(out["selected_layers"].iloc[0], "b|a")
-        # b: +0.7, a: +0.1 -> mean delta 0.4, mean abs 0.4
+        # b and a together give mean delta=0.4 and mean |delta|=0.4.
         self.assertAlmostEqual(float(out["topk_mean_delta"].iloc[0]), 0.4)
         self.assertAlmostEqual(float(out["topk_mean_abs_delta"].iloc[0]), 0.4)
         self.assertAlmostEqual(float(out["max_abs_delta"].iloc[0]), 0.7)
@@ -198,7 +198,7 @@ class LoadSimilarityCsvTest(unittest.TestCase):
     def test_load_orients_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "s.csv"
-            # Raw euclidean smaller = more similar; two layers two epochs.
+            # Raw Euclidean: smaller = more similar.
             raw = pd.DataFrame(
                 [
                     {"epoch": 0, "layer": "a", "n_samples": 1, "n_features": 2, "euclidean": 2.0},

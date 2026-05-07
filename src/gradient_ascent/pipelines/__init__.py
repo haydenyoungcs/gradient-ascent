@@ -1,4 +1,4 @@
-"""Higher-level experiment pipelines (e.g. multi-forget-class sweeps)."""
+"""Higher-level experiment pipelines (e.g. forget-label sweeps)."""
 
 from .multitarget import MultiTargetAggregateArtifacts, run_multitarget_averaged_experiment
 

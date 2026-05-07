@@ -8,7 +8,7 @@ from gradient_ascent.similarity import CCA, CKA, evaluate_pair_rows, linear_cka_
 
 
 def _legacy_linear_cka_via_centered_gram(x: np.ndarray, y: np.ndarray) -> float:
-    """Reference implementation matching the pre-optimisation CKA path."""
+    """Slow reference implementation of linear CKA used to check the optimised path."""
     means_k = (x @ x.T).mean(axis=0, keepdims=True)
     k = x @ x.T - means_k - means_k.T + (x @ x.T).mean()
     means_l = (y @ y.T).mean(axis=0, keepdims=True)

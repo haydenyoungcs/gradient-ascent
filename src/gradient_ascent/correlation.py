@@ -1,8 +1,7 @@
-"""Scalar similarity change vs MIA reduction for dissertation-style exploratory analysis.
+"""Correlate similarity changes with MIA / accuracy outcomes.
 
-Similarity trajectory CSVs store **raw** metric values. Run-level endpoint
-features in this module use those raw values directly (unscaled deltas).
-Epoch-wise analyses still use oriented layer means to match trajectory plots.
+Run-level features use raw similarity values (signed end−start deltas).
+Epoch-wise analyses use oriented layer means so they line up with the trajectory plots.
 """
 
 from __future__ import annotations
@@ -22,14 +21,14 @@ from .data import CIFAR10_CLASSES
 from .reporting import orient_epoch_rows_for_similarity
 from .similarity import LOWER_BETTER_METRICS
 
-# Default trajectory metrics (wide columns in saved CSVs).
+# Default similarity metrics written into wide CSV exports.
 DEFAULT_SIMILARITY_METRICS: tuple[str, ...] = ("cka_linear", "cca", "cosine", "euclidean", "kl_sym")
 
 REQUIRED_SIMILARITY_BASE_COLS = frozenset({"epoch", "layer", "n_samples", "n_features"})
 
 
 def _similarity_wide_to_epoch_rows(df: pd.DataFrame, metric_cols: list[str]) -> list[tuple[int, list[dict]]]:
-    """Convert a wide similarity dataframe to the nested structure used by orientation helpers."""
+    """Convert a wide similarity dataframe to the (epoch, rows) format orientation helpers expect."""
     out: dict[int, list[dict]] = {}
     for epoch in sorted(df["epoch"].unique()):
         sub = df.loc[df["epoch"] == epoch].sort_values("layer")
@@ -61,18 +60,11 @@ def load_similarity_csv(
     apply_orientation: bool = True,
     lower_better_metrics: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
-    """Load a similarity trajectory CSV written by ``save_similarity_trajectory_csv``.
+    """Load a similarity trajectory CSV.
 
-    On-disk files use **raw** scores. When ``apply_orientation`` is True (default),
-    rows are re-scaled with ``orient_epoch_rows_for_similarity`` so that, for every
-    metric, larger values mean closer match to the reference (consistent with plots).
-
-    Parameters
-    ----------
-    apply_orientation
-        If False, return raw CSV values (use only when you will orient downstream).
-    lower_better_metrics
-        Passed to ``orient_epoch_rows_for_similarity``; defaults to ``LOWER_BETTER_METRICS``.
+    CSVs store raw values. With ``apply_orientation=True`` (default) every metric
+    is rescaled so larger means closer to the reference, matching the plots.
+    Set it to False if you will orient downstream.
     """
     if not path.is_file():
         raise FileNotFoundError(f"Similarity CSV not found: {path}")
@@ -103,17 +95,12 @@ def compute_topk_layer_delta(
     layer_col: str = "layer",
     value_col: str | None = None,
 ) -> pd.DataFrame:
-    """Pick top-k layers by absolute similarity change (end − start) for one metric.
+    """Pick the top-k layers with the biggest absolute similarity change (end − start).
 
-    The wide metric column is named ``metric`` unless ``value_col`` is set.
-
-    Returns a one-row DataFrame with diagnostics.
-
-    In addition to top-k means, this always reports the single-layer endpoint
-    change for the most-shifted layer (largest ``abs_delta``):
-    ``max_changed_layer_delta`` (signed) and ``max_changed_layer_abs_delta``.
-    If ``lower_is_more_similar`` is True (e.g., Euclidean/KL), delta signs are
-    flipped so that positive always means "more similar".
+    Returns one row of diagnostics: the top-k mean (signed and absolute), the
+    most-shifted layer's signed/absolute delta, and the picked layer names.
+    For lower-is-better metrics (Euclidean/KL) the sign is flipped so positive
+    always means "more similar".
     """
     if value_col is None:
         value_col = metric
@@ -206,7 +193,7 @@ def summarise_similarity_deltas(
     k: int = 2,
     lower_better_metrics: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
-    """Top-k layer deltas for every metric column present (unknown metrics are skipped)."""
+    """Run top-k layer-delta summaries for every metric in the dataframe."""
     want = list(metrics) if metrics is not None else list(DEFAULT_SIMILARITY_METRICS)
     lower = set(lower_better_metrics) if lower_better_metrics is not None else set(LOWER_BETTER_METRICS)
     frames: list[pd.DataFrame] = []
@@ -220,10 +207,9 @@ def summarise_similarity_deltas(
 
 
 def load_mia_csv(path: Path, *, mia_value_col: Optional[str] = None) -> tuple[pd.DataFrame, str]:
-    """Load MIA trajectory CSV; return dataframe and resolved scalar column name.
+    """Load an MIA trajectory CSV and pick the scalar column to correlate against.
 
-    Default scalar for correlation is ``forget_logreg_mean_member_prob`` (forget-set
-    logistic-regression mean member probability). Pass ``mia_value_col`` to override.
+    Defaults to ``forget_logreg_mean_member_prob``; override with ``mia_value_col``.
     """
     if not path.is_file():
         raise FileNotFoundError(f"MIA CSV not found: {path}")
@@ -259,14 +245,10 @@ def compute_mia_delta(
     mia_value_col: str,
     epoch_col: str = "epoch",
 ) -> dict[str, float | int]:
-    """Start/end statistics for one scalar MIA trajectory.
+    """Start/end statistics for one MIA trajectory.
 
-    Sign convention
-    ---------------
-    ``mia_delta`` = end − start (raw change in the attack score).
-
-    ``mia_reduction`` = start − end so that **positive** values mean the attack
-    became **less** confident on the forget set (privacy improvement for this score).
+    ``mia_delta`` = end − start. ``mia_reduction`` = start − end, so positive
+    values mean the attack got weaker on the forget set (privacy improved).
     """
     g = mia_df.sort_values(epoch_col)
     starts = g.iloc[0]
@@ -288,7 +270,7 @@ def _utility_deltas_from_classwise(
     classwise_path: Path,
     forget_label: int,
 ) -> dict[str, float]:
-    """Forget / retain accuracy deltas from classwise history CSV (optional fields)."""
+    """Forget vs retain accuracy deltas read from a classwise history CSV."""
     out = {
         "forget_accuracy_reduction": np.nan,
         "retain_accuracy_delta": np.nan,
@@ -337,7 +319,7 @@ def build_similarity_mia_correlation_table(
     mia_value_col: Optional[str] = None,
     lower_better_metrics: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
-    """Join per-target similarity summaries with MIA deltas (one row per run × metric × reference)."""
+    """Join per-target similarity summaries with MIA deltas: one row per run × metric × reference."""
     algos = list(algorithms) if algorithms is not None else list(ALGORITHM_ORDER)
     metrics_filter = list(similarity_metrics) if similarity_metrics is not None else list(DEFAULT_SIMILARITY_METRICS)
 
@@ -444,18 +426,15 @@ def compute_correlations(
     *,
     y_col: str = "mia_reduction",
 ) -> pd.DataFrame:
-    """Pooled Pearson/Spearman correlations across all rows in the table.
+    """Pooled Pearson/Spearman correlations, one block per (reference, similarity metric).
 
-    One block of outputs per (reference, similarity_metric). X features are
-    **signed** similarity endpoint movement (positive = more similar to the
-    reference after unlearning): ``max_changed_layer_delta`` when present, else
-    top-2 or top-k mean deltas.
+    X is signed similarity movement (positive = more similar to the reference
+    after unlearning), preferring ``max_changed_layer_delta`` when available.
     """
     if correlation_table.empty:
         return pd.DataFrame()
 
     out_rows: list[dict] = []
-    # Signed similarity movement only (positive = more similar to reference after unlearning).
     x_candidates: list[tuple[str, str]] = []
     if "max_changed_layer_delta" in correlation_table.columns:
         x_candidates.append(("max_changed_layer_delta", "max_changed_layer_delta"))
@@ -508,12 +487,7 @@ def scatter_similarity_vs_mia(
     title: str | None = None,
     corr_text_loc: str = "upper left",
 ) -> Path:
-    """Scatter with algorithm colour, least-squares line, and pooled correlation caption.
-
-    Pearson/Spearman are computed on the same finite ``(x_col, y_col)`` pairs as the
-    scatter (pooled across algorithms). The caption is drawn in axes coordinates so it
-    stays in a fixed corner and usually avoids overlapping the cloud of points.
-    """
+    """Scatter plot with per-algorithm colours, a least-squares line and a correlation caption."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if table.empty or x_col not in table.columns:
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -587,7 +561,6 @@ def scatter_similarity_vs_mia(
     ax.set_xlabel(x_col)
     ax.set_ylabel(y_col)
     ax.set_title(title or f"{y_col} vs {x_col}")
-    # Lower right keeps the upper-left correlation box readable (legend "best" often collides).
     ax.legend(loc="lower right", fontsize="small", ncol=2, framealpha=0.92)
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -605,7 +578,7 @@ def bar_correlation_summary(
     y_feature: str = "mia_reduction",
     correlation_type: str = "spearman",
 ) -> Path:
-    """Bar chart: similarity metric vs correlation coefficient for one x_feature."""
+    """Bar chart of correlation coefficient by similarity metric (one x_feature)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sub = corr_df[
         (corr_df["reference"] == reference)
@@ -639,7 +612,7 @@ def bar_correlation_summary(
 
 
 def _load_classwise_epoch_accuracy(path: Path, forget_label: int) -> pd.DataFrame:
-    """Per-epoch forget-class accuracy and mean retained-class accuracy (0–1 scale)."""
+    """Per-epoch forget accuracy and mean retain accuracy (0–1)."""
     if not path.is_file():
         return pd.DataFrame()
     df = pd.read_csv(path)
@@ -664,7 +637,7 @@ def _load_classwise_epoch_accuracy(path: Path, forget_label: int) -> pd.DataFram
 
 
 def _similarity_mean_over_layers_per_epoch(sim_df: pd.DataFrame, metric_names: Sequence[str]) -> pd.DataFrame:
-    """Pool layers: one value per metric per unlearning step (matches summary-plot intuition)."""
+    """Average across layers: one value per metric per unlearning step (matches summary plots)."""
     present = [m for m in metric_names if m in sim_df.columns]
     if not present:
         return pd.DataFrame()
@@ -683,10 +656,10 @@ def build_epoch_level_multitarget_long_table(
     mia_value_col: Optional[str] = None,
     lower_better_metrics: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
-    """Stack per-target trajectories: each row is one (algorithm, forget class, reference, step).
+    """Stack per-target trajectories — one row per (algorithm, forget class, reference, step).
 
-    Similarity columns are ``sim_mean_<metric>`` (mean over layers, **oriented** scores).
-    Outcomes: ``mia_value`` (scalar MIA column), ``forget_accuracy``, ``retain_mean_accuracy``.
+    Similarity columns are ``sim_mean_<metric>`` (oriented, layer mean). Outcomes:
+    ``mia_value``, ``forget_accuracy``, ``retain_mean_accuracy``.
     """
     algos = list(algorithms) if algorithms is not None else list(ALGORITHM_ORDER)
     metrics = list(similarity_metrics) if similarity_metrics is not None else list(DEFAULT_SIMILARITY_METRICS)
@@ -756,10 +729,9 @@ def compute_epochwise_cross_run_correlations(
     *,
     min_n: int = 15,
 ) -> pd.DataFrame:
-    """At each unlearning step, correlate similarity means with MIA / accuracy across runs.
+    """At each step, correlate similarity means with MIA / accuracy across runs.
 
-    Each correlation uses all (algorithm × forget class) rows available at that ``epoch``
-    (typically 50 when five algorithms and ten forget labels are present).
+    Each correlation pools all (algorithm × forget class) rows available at that step.
     """
     if long_df.empty:
         return pd.DataFrame()
@@ -810,7 +782,7 @@ def plot_epochwise_correlation_lines(
     out_path: Path,
     correlation: str = "spearman",
 ) -> Path:
-    """One line per similarity metric: correlation vs unlearning step for a fixed outcome."""
+    """Line plot: correlation vs unlearning step, one line per similarity metric."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     rcol = f"{correlation}_r"
     sub = epoch_corr[(epoch_corr["reference"] == reference) & (epoch_corr["outcome"] == outcome)]
@@ -848,7 +820,7 @@ def run_epochwise_similarity_outcome_correlation(
     lower_better_metrics: Optional[Sequence[str]] = None,
     min_n: int = 15,
 ) -> dict[str, Path]:
-    """Cross-run correlations at each step; saves CSV and line plots under ``out_dir/correlation/epochwise/``."""
+    """Compute and save per-step cross-run correlations under ``out_dir/correlation/epochwise/``."""
     out_dir = Path(out_dir)
     root = out_dir / "correlation" / "epochwise"
     root.mkdir(parents=True, exist_ok=True)
@@ -899,7 +871,7 @@ def run_similarity_mia_correlation_analysis(
     mia_value_col: Optional[str] = None,
     lower_better_metrics: Optional[Sequence[str]] = None,
 ) -> dict[str, Path]:
-    """Build correlation tables, summary stats, and plots under ``out_dir / 'correlation'``."""
+    """Build the run-level correlation table, stats, and figures under ``out_dir/correlation``."""
     out_dir = Path(out_dir)
     corr_root = out_dir / "correlation"
     corr_root.mkdir(parents=True, exist_ok=True)

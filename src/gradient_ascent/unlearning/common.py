@@ -19,14 +19,14 @@ def _save_snapshot(model: nn.Module, snapshot_dir: Optional[str], epoch: int) ->
 
 
 def _infinite_loader(loader):
-    """Endless iterator used to draw retain batches inside a forget-paced loop."""
+    """Yield batches forever — used to pair retain batches with forget batches."""
     while True:
         for batch in loader:
             yield batch
 
 
 def _set_bn_eval(model: nn.Module) -> None:
-    """Put every BatchNorm layer into eval mode without touching other modules."""
+    """Switch only the BatchNorm layers to eval mode, leaving others as-is."""
     for module in model.modules():
         if isinstance(module, nn.modules.batchnorm._BatchNorm):
             module.eval()

@@ -14,32 +14,20 @@ from .common import _infinite_loader, _loader_dataset_size, _save_snapshot
 
 @dataclass(frozen=True)
 class SalUnConfig:
-    """SalUn: saliency-masked random-labeling unlearning (Fan et al., 2024).
+    """SalUn: saliency-masked random-labelling unlearning (Fan et al., 2024).
 
-    Matches Algorithm 1 of the paper: compute the weight-saliency mask ``m_S``
-    from the forget-set gradient magnitudes at the pre-unlearning checkpoint,
-    then minimise ``CE(f_theta(x_f), y'_f) + CE(f_theta(x_r), y_r)`` with gradients
-    restricted to ``m_S``, where ``y'_f`` is a random label distinct from the
-    true forget-set label. Both the forget and retain terms are part of the
-    published objective.
+    Builds a binary mask ``m_S`` of the most-salient weights from forget-set
+    gradient magnitudes, then minimises
+    ``CE(f(x_f), y'_f) + beta * CE(f(x_r), y_r)`` with updates restricted to
+    ``m_S``. ``y'_f`` is a random wrong label.
 
-    ``weight_decay`` defaults to 0 because PyTorch's ``SGD`` adds
-    ``weight_decay * param`` to the gradient *inside* ``step()``, i.e. after
-    we have zeroed the gradient on non-salient weights; any non-zero value
-    would therefore leak through the saliency mask and violate the
-    ``theta <- theta - eta * m_S o grad L`` update rule. Regularization, if desired,
-    must be folded into the loss explicitly.
+    ``weight_decay`` defaults to 0: PyTorch's SGD adds it to the gradient
+    *after* we zero it on non-salient weights, which would leak through the
+    mask. Apply L2 regularisation in the loss instead.
 
-    ``retain_weight`` (beta) scales the retain-side cross-entropy term:
-    ``L = CE(f_theta(x_f), y'_f) + beta * CE(f_theta(x_r), y_r)``. Algorithm 1 in the
-    paper assumes joint sampling from ``D_f U D_r`` so the per-step ratio of
-    forget to retain examples matches their dataset proportions. Our loop
-    iterates the forget loader as the outer loop and draws one retain batch
-    per forget batch (1:1), which over-weights the random-label term by a
-    factor of ``|D_r|/|D_f|`` relative to the joint-sampling regime. Setting
-    ``retain_weight=None`` (default) lets ``run_salun_unlearning`` measure
-    that ratio at runtime and apply it as ``beta``; pass an explicit float to
-    override (use ``1.0`` to recover the literal Algorithm 1 schedule).
+    ``retain_weight`` (beta) compensates for our 1:1 forget-vs-retain pairing
+    versus the paper's joint sampling. Default ``None`` rescales by
+    ``|D_r|/|D_f|`` automatically; pass ``1.0`` to match Algorithm 1 literally.
     """
 
     lr: float = 5e-3
@@ -60,7 +48,7 @@ def estimate_salun_importance(
     device: torch.device,
     max_batches: int,
 ) -> Dict[str, torch.Tensor]:
-    """Accumulate |grad_theta L(x, y; theta_o)| over the forget set for saliency scoring."""
+    """Average ``|grad_theta L|`` over the forget set to score weight saliency."""
     amp = build_amp_config(device)
     params_named = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
     importance = {name: torch.zeros_like(param, device=device) for name, param in params_named}
@@ -106,7 +94,7 @@ def build_salun_mask(importance: Dict[str, torch.Tensor], mask_ratio: float) -> 
 
 
 def _random_wrong_labels(labels: torch.Tensor, num_classes: int, generator: torch.Generator) -> torch.Tensor:
-    """Sample a label in ``[0, num_classes)`` distinct from each ``labels[i]``."""
+    """Pick a random label per row that differs from the true label."""
     offsets = torch.randint(
         1,
         num_classes,
@@ -127,10 +115,10 @@ def run_salun_unlearning(
     num_classes: int = 10,
     snapshot_dir: Optional[str] = None,
 ):
-    """SalUn unlearning per Algorithm 1 of Fan et al. (2024)."""
+    """Run SalUn unlearning: build a saliency mask, then masked SGD over forget+retain pairs."""
     config = config or SalUnConfig()
     if retain_loader is None:
-        raise ValueError("SalUn requires a retain_loader; see Fan et al. (2024) Algorithm 1.")
+        raise ValueError("SalUn requires a retain_loader.")
 
     amp = build_amp_config(device)
     criterion = nn.CrossEntropyLoss()

@@ -29,8 +29,7 @@ def _save_cached_activations(cache_path: str, acts: Dict[str, np.ndarray]) -> No
     cache_dir = os.path.dirname(cache_path)
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
-    # Uncompressed NPZ is intentionally faster to write/read for iterative
-    # notebook reruns where activation extraction dominates wall-clock time.
+    # Uncompressed NPZ keeps cache reads/writes fast.
     np.savez(cache_path, **acts)
 
 
@@ -63,7 +62,7 @@ def compute_epoch_rows_from_snapshots_multi_reference(
     metric_timing_seconds: Optional[Dict[str, float]] = None,
     step_stride: int = 1,
 ) -> Dict[str, List[Tuple[int, List[dict]]]]:
-    """Compute snapshot activations once, then score against multiple references."""
+    """Collect activations once per snapshot and score them against every reference."""
     if int(step_stride) <= 0:
         raise ValueError(f"step_stride must be >= 1, got {step_stride}")
     rows_by_reference: Dict[str, List[Tuple[int, List[dict]]]] = {key: [] for key in reference_acts_map}
@@ -151,7 +150,7 @@ def save_similarity_evolving_bar_plot(
     if not oriented_rows:
         raise RuntimeError("Cannot create evolving similarity bar plot: epoch_rows is empty.")
 
-    # Mean over layers at each step gives a compact per-metric trajectory frame.
+    # Average across layers so each epoch becomes a single bar per metric.
     mean_values_by_epoch: list[tuple[int, np.ndarray]] = []
     for epoch_num, rows in oriented_rows:
         metric_means = []
@@ -259,12 +258,10 @@ def save_similarity_before_after_grouped_bar_plot(
     metric_names: Iterable[str],
     lower_better_metrics: Iterable[str],
 ) -> str:
-    """Save a static grouped bar chart comparing first vs last unlearning step.
+    """Grouped bar chart comparing the first and last unlearning step.
 
-    Layout is:
-      - 5 metric groups on x-axis (or len(metric_names) in general),
-      - each metric group contains two subgroups: "Before" and "After",
-      - each subgroup contains one bar per layer.
+    One group per metric; each group has a "Before" and "After" subgroup,
+    with one bar per layer in each subgroup.
     """
     metric_names = list(metric_names)
     layer_names = list(layer_names)
@@ -315,7 +312,7 @@ def save_similarity_before_after_grouped_bar_plot(
             color=color_map(layer_idx),
         )
 
-    # Layer legend uses proxy artists so we can keep one clean legend block.
+    # Single legend with one entry per layer (proxy artists).
     layer_handles = [
         plt.Rectangle((0, 0), 1, 1, color=color_map(layer_idx), label=layer_name)
         for layer_idx, layer_name in enumerate(layer_names)
@@ -331,8 +328,7 @@ def save_similarity_before_after_grouped_bar_plot(
     ax.set_xticklabels(metric_names, rotation=0, ha="center")
     ax.grid(axis="y", alpha=0.3)
 
-    # Add subgroup labels as a separate lower text row so they do not overlap
-    # with metric names.
+    # Place "Before"/"After" labels below the axis so they don't collide.
     for metric_idx in range(len(metric_names)):
         ax.text(before_centers[metric_idx], -0.022, "Before", ha="center", va="top", fontsize=9)
         ax.text(after_centers[metric_idx], -0.022, "After", ha="center", va="top", fontsize=9)

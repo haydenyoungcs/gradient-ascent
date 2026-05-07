@@ -1,4 +1,4 @@
-"""Experiment orchestration: core training/unlearning, trajectory evaluation, combined figures."""
+"""Pipelines for core checkpoints, similarity/MIA trajectories, and combined plots."""
 
 from .combined import save_combined_trajectory_comparison
 from .core import run_core_checkpoints
