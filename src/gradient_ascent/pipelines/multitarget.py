@@ -16,7 +16,6 @@ from ..constants import ALGORITHM_ORDER, SIMILARITY_REFERENCES
 from ..correlation import run_epochwise_similarity_outcome_correlation, run_similarity_mia_correlation_analysis
 from ..experiments import (
     CoreExperimentArtifacts,
-    TrajectoryExperimentConfig,
     ensure_wandb_run,
     run_core_checkpoints,
     run_trajectory_analysis,
@@ -385,6 +384,7 @@ def run_multitarget_averaged_experiment(
     reuse_trajectory_outputs: bool = True,
     similarity_data_mode: Literal["forget", "retain", "test"] = "forget",
     shared_original_checkpoint_path: Optional[str] = None,
+    trajectory_algorithm_keys: Optional[tuple[str, ...]] = None,
 ) -> MultiTargetAggregateArtifacts:
     """Sweep over forget labels (default 0..9) and produce averaged utility/similarity/MIA outputs.
 
@@ -392,6 +392,7 @@ def run_multitarget_averaged_experiment(
     fast if it can't find one (no implicit retraining).
     """
     labels = target_labels or list(range(runtime.num_classes))
+    traj_algo_keys = list(trajectory_algorithm_keys) if trajectory_algorithm_keys is not None else list(ALGORITHM_ORDER)
     aggregate_out_dir = out_dir or os.path.join(runtime.out_dir, "multitarget_aggregate")
     os.makedirs(aggregate_out_dir, exist_ok=True)
     shared_dir = os.path.join(aggregate_out_dir, "shared")
@@ -471,12 +472,12 @@ def run_multitarget_averaged_experiment(
                         target_out_dir,
                         f"similarity_vs_unlearning_epoch_{algorithm_key}_vs_{reference_key}.csv",
                     )
-                    for algorithm_key in ALGORITHM_ORDER
+                    for algorithm_key in traj_algo_keys
                     for reference_key in SIMILARITY_REFERENCES
                 ]
                 expected_mia_csvs = [
                     os.path.join(target_out_dir, f"mia_vs_unlearning_epoch_{algorithm_key}.csv")
-                    for algorithm_key in ALGORITHM_ORDER
+                    for algorithm_key in traj_algo_keys
                 ]
                 expected_baseline_csv = os.path.join(target_out_dir, "mia_retrained_baseline.csv")
                 if all(
@@ -494,6 +495,7 @@ def run_multitarget_averaged_experiment(
                 target_label=int(target_label),
                 retain_control_label=int((int(target_label) + 1) % runtime.num_classes),
                 similarity_data_mode=similarity_data_mode,
+                trajectory_algorithm_keys=trajectory_algorithm_keys,
             )
             similarity_setup_for_target = similarity_setup_with_trajectory_cca(similarity_setup, trajectory_config)
             wandb_run = ensure_wandb_run(

@@ -322,9 +322,14 @@ def run_notebook_trajectory_experiment(
     wandb_module=None,
     wandb_project: str = "gradient-ascent",
     wandb_name: str = "unlearning-algorithm-comparison",
+    trajectory_algorithm_keys: Optional[tuple[str, ...]] = None,
 ) -> tuple[TrajectoryExperimentArtifacts, object]:
     """Run the full trajectory/MIA/similarity pipeline from the notebook."""
-    trajectory_config = replace(build_default_trajectory_config(runtime), similarity_data_mode=similarity_data_mode)
+    trajectory_config = replace(
+        build_default_trajectory_config(runtime),
+        similarity_data_mode=similarity_data_mode,
+        trajectory_algorithm_keys=trajectory_algorithm_keys,
+    )
     similarity_setup = similarity_setup_with_trajectory_cca(similarity_setup, trajectory_config)
     wandb_run = ensure_wandb_run(wandb_module, project=wandb_project, name=wandb_name)
     artifacts = run_trajectory_analysis(
@@ -387,11 +392,14 @@ def save_notebook_combined_comparison(
     wandb_module=None,
     wandb_project: str = "gradient-ascent",
     wandb_name: str = "unlearning-algorithm-comparison",
+    *,
+    algo_keys: Optional[tuple[str, ...]] = None,
 ) -> str:
     """Save the combined similarity + MIA comparison figure across algorithms."""
     wandb_run = ensure_wandb_run(wandb_module, project=wandb_project, name=wandb_name)
+    keys = algo_keys if algo_keys is not None else tuple(ALGORITHM_ORDER)
     return save_combined_trajectory_comparison(
-        CombinedComparisonConfig(out_dir=runtime.out_dir),
+        CombinedComparisonConfig(out_dir=runtime.out_dir, algo_keys=keys),
         wandb_run=wandb_run,
         wandb_module=wandb_module,
     )
@@ -469,6 +477,7 @@ def run_and_display_notebook_trajectory_pipeline(
     similarity_setup: SimilaritySetup,
     similarity_data_mode: Literal["forget", "retain", "test"] = "forget",
     wandb_module=None,
+    trajectory_algorithm_keys: Optional[tuple[str, ...]] = None,
 ):
     """Run trajectory/MIA/similarity analysis and display every figure inline."""
     from IPython.display import Image as IPyImage, clear_output, display
@@ -480,9 +489,10 @@ def run_and_display_notebook_trajectory_pipeline(
         similarity_setup,
         similarity_data_mode=similarity_data_mode,
         wandb_module=wandb_module,
+        trajectory_algorithm_keys=trajectory_algorithm_keys,
     )
 
-    for algorithm_key in ALGORITHM_ORDER:
+    for algorithm_key in trajectory_artifacts.similarity_artifacts.keys():
         mia_artifact = trajectory_artifacts.mia_artifacts[algorithm_key]
         display(IPyImage(filename=mia_artifact.grid_plot_path))
         display(IPyImage(filename=mia_artifact.control_plot_path))
@@ -520,11 +530,16 @@ def run_and_display_notebook_trajectory_pipeline(
     return trajectory_artifacts, trajectory_wandb_run
 
 
-def run_and_display_notebook_combined_comparison(runtime: NotebookRuntime, wandb_module=None) -> str:
+def run_and_display_notebook_combined_comparison(
+    runtime: NotebookRuntime,
+    wandb_module=None,
+    *,
+    algo_keys: Optional[tuple[str, ...]] = None,
+) -> str:
     """Build and show the combined cross-algorithm comparison figure."""
     from IPython.display import Image as IPyImage, display
 
-    combined_path = save_notebook_combined_comparison(runtime, wandb_module=wandb_module)
+    combined_path = save_notebook_combined_comparison(runtime, wandb_module=wandb_module, algo_keys=algo_keys)
     print(f"Saved integrated comparison figure to {combined_path}")
     display(IPyImage(filename=combined_path))
     return combined_path

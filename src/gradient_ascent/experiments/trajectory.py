@@ -65,6 +65,19 @@ def run_trajectory_analysis(
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing checkpoint: {path}")
 
+    snapshot_dirs = dict(snapshot_dirs)
+    if config.trajectory_algorithm_keys:
+        wanted = tuple(str(k) for k in config.trajectory_algorithm_keys)
+        missing = [k for k in wanted if k not in snapshot_dirs]
+        if missing:
+            raise ValueError(
+                f"trajectory_algorithm_keys={wanted!r} not found in snapshot_dirs keys "
+                f"{sorted(snapshot_dirs)} (missing={missing})"
+            )
+        snapshot_dirs = {k: snapshot_dirs[k] for k in wanted}
+    if not snapshot_dirs:
+        raise ValueError("No snapshot_dirs left after trajectory_algorithm_keys filter.")
+
     t0 = time.perf_counter()
     similarity_dataset = testset
     similarity_label = "test"

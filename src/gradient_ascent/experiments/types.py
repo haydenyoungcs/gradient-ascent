@@ -90,6 +90,8 @@ class TrajectoryExperimentConfig:
     mia_mlp_sweep_enabled: bool = True
     mia_mlp_sweep_hidden_layer_sizes: tuple[tuple[int, ...], ...] = ((64, 32), (128, 64), (64,))
     mia_mlp_sweep_alphas: tuple[float, ...] = (1e-4, 1e-3)
+    # If set, run similarity + MIA trajectories only for these algorithms (subset of snapshot_dirs keys).
+    trajectory_algorithm_keys: Optional[tuple[str, ...]] = None
 
 
 @dataclass(frozen=True)

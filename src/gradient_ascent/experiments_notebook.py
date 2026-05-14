@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from .constants import ALGORITHM_ORDER
 from .notebook_bootstrap import NotebookBootstrapResult, bootstrap_notebook_environment
 from .pipelines.multitarget import MultiTargetAggregateArtifacts
 
@@ -132,6 +133,8 @@ def experiments_section_core(
 @dataclass
 class TrajectorySectionConfig:
     similarity_data_mode: Literal["forget", "retain", "test"] = "forget"
+    # None = use module-level ``TRAJECTORY_ALGORITHM_KEYS`` (see timing flags below).
+    trajectory_algorithm_keys: Optional[tuple[str, ...]] = None
 
 
 def experiments_section_trajectory(
@@ -141,10 +144,11 @@ def experiments_section_trajectory(
     wandb_module: Any,
     config: Optional[TrajectorySectionConfig] = None,
 ) -> tuple[Any, Any, Any]:
-    """Section 2 — similarity and MIA trajectories for every baseline."""
+    """Section 2 — similarity and MIA trajectories (optionally a subset of baselines)."""
     from .notebook_helpers import prepare_similarity_setup, run_and_display_notebook_trajectory_pipeline
 
     cfg = config or TrajectorySectionConfig()
+    traj_keys = cfg.trajectory_algorithm_keys if cfg.trajectory_algorithm_keys is not None else TRAJECTORY_ALGORITHM_KEYS
     similarity_setup = prepare_similarity_setup()
     trajectory_artifacts, trajectory_wandb_run = run_and_display_notebook_trajectory_pipeline(
         runtime,
@@ -152,6 +156,7 @@ def experiments_section_trajectory(
         similarity_setup,
         similarity_data_mode=cfg.similarity_data_mode,
         wandb_module=wandb_module,
+        trajectory_algorithm_keys=traj_keys,
     )
     return similarity_setup, trajectory_artifacts, trajectory_wandb_run
 
@@ -160,7 +165,10 @@ def experiments_section_combined(runtime: Any, *, wandb_module: Any) -> str:
     """Section 3 — overlay similarity and MIA across algorithms in one figure."""
     from .notebook_helpers import run_and_display_notebook_combined_comparison
 
-    return run_and_display_notebook_combined_comparison(runtime, wandb_module=wandb_module)
+    combined_algo_keys = TRAJECTORY_ALGORITHM_KEYS if TRAJECTORY_ALGORITHM_KEYS is not None else tuple(ALGORITHM_ORDER)
+    return run_and_display_notebook_combined_comparison(
+        runtime, wandb_module=wandb_module, algo_keys=combined_algo_keys
+    )
 
 
 def _seed_frog_target_from_single_run(*, single_out: Path, multi_root: Path, target_label: int = 6) -> None:
@@ -265,6 +273,10 @@ class MultitargetSectionConfig:
     similarity_data_mode: Literal["forget", "retain", "test"] = "forget"
     clear_similarity_activation_cache: bool = True
     clear_existing_similarity_outputs: bool = True
+    # None = use ``MULTITARGET_TIMING_LABELS`` from module timing flags.
+    target_labels: Optional[tuple[int, ...]] = None
+    # None = use ``TRAJECTORY_ALGORITHM_KEYS`` from module timing flags.
+    trajectory_algorithm_keys: Optional[tuple[str, ...]] = None
 
 
 def _clear_similarity_outputs_for_target(target_dir: Path) -> None:
@@ -318,25 +330,28 @@ def experiments_section_multitarget(
     core_config: CoreSectionConfig,
     multitarget_config: Optional[MultitargetSectionConfig] = None,
 ) -> MultiTargetAggregateArtifacts:
-    """Section 4 — forget-label sweep across all classes plus aggregate plots."""
+    """Section 4 — forget-label sweep (or a subset when timing-lite) plus aggregate plots."""
     from .notebook_helpers import prepare_similarity_setup, run_multitarget_averaged_experiment
 
     cfg = multitarget_config or MultitargetSectionConfig()
     single_out = Path(out_dir)
     multi_root = single_out / "multitarget_aggregate"
+    labels = list(cfg.target_labels) if cfg.target_labels is not None else list(MULTITARGET_TIMING_LABELS)
+    traj_keys = cfg.trajectory_algorithm_keys if cfg.trajectory_algorithm_keys is not None else TRAJECTORY_ALGORITHM_KEYS
+    reuse_unlearned_mt = True if TIMING_LITE_MODE else core_config.reuse_unlearned_checkpoints
 
     if cfg.seed_frog_target_from_single_run:
         _seed_frog_target_from_single_run(single_out=single_out, multi_root=multi_root, target_label=cfg.frog_target_label)
 
     if cfg.clear_similarity_activation_cache:
-        for target_label in range(10):
+        for target_label in labels:
             cache_dir = multi_root / f"target_{target_label}" / "similarity_activation_cache"
             if cache_dir.exists():
                 shutil.rmtree(cache_dir)
                 print(f"Cleared activation cache: {cache_dir}")
 
     if cfg.clear_existing_similarity_outputs:
-        for target_label in range(10):
+        for target_label in labels:
             target_dir = multi_root / f"target_{target_label}"
             _clear_similarity_outputs_for_target(target_dir)
         correlation_dir = multi_root / "correlation"
@@ -348,17 +363,18 @@ def experiments_section_multitarget(
     multi_target_artifacts = run_multitarget_averaged_experiment(
         runtime,
         similarity_setup,
-        target_labels=list(range(10)),
+        target_labels=labels,
         out_dir=str(multi_root),
         run_similarity_stage=cfg.run_similarity_stage,
         wandb_module=wandb_module,
         reuse_existing_checkpoints=core_config.reuse_existing_checkpoints,
         reuse_original_checkpoint=core_config.reuse_original_checkpoint,
         reuse_retrained_checkpoint=core_config.reuse_retrained_checkpoint,
-        reuse_unlearned_checkpoints=core_config.reuse_unlearned_checkpoints,
+        reuse_unlearned_checkpoints=reuse_unlearned_mt,
         reuse_trajectory_outputs=cfg.reuse_trajectory_outputs,
         similarity_data_mode=cfg.similarity_data_mode,
         shared_original_checkpoint_path=str(multi_root / "shared" / "original_net.pt"),
+        trajectory_algorithm_keys=traj_keys,
     )
     print("Saved multi-target aggregate artefacts under:", str(multi_root))
     print("Utility aggregate CSVs:")
@@ -441,6 +457,8 @@ def experiments_refresh_similarity_and_correlation(
         similarity_data_mode=cfg.similarity_data_mode,
         clear_similarity_activation_cache=cfg.clear_similarity_activation_cache,
         clear_existing_similarity_outputs=cfg.clear_existing_similarity_outputs,
+        target_labels=tuple(range(10)),
+        trajectory_algorithm_keys=tuple(ALGORITHM_ORDER),
     )
     multi_target_artifacts = experiments_section_multitarget(
         runtime,
@@ -454,8 +472,21 @@ def experiments_refresh_similarity_and_correlation(
     return multi_target_artifacts, correlation_paths
 
 
+# --- Timing / compute presets (edit before a full paper run) ---
+# When ``True``: Section 1 runs five timed unlearning jobs once; Section 2 runs MIA +
+# similarity only for ``TRAJECTORY_ALGORITHM_KEYS`` (default GA); Section 4 uses only
+# ``MULTITARGET_TIMING_LABELS`` (default frog=6) and **reuses** unlearned checkpoints
+# copied from Section 1 (no extra 45 unlearning runs). Set ``False`` for the full
+# 10-forget-class × five-algorithm sweep and all-trajectory plots.
+TIMING_LITE_MODE = True
+MULTITARGET_TIMING_LABELS: tuple[int, ...] = (6,) if TIMING_LITE_MODE else tuple(range(10))
+# Subset of ``("ga", "ssd", "salun", "certified", "scrub")`` for trajectory timing; ``None`` = all five.
+TRAJECTORY_ALGORITHM_KEYS: tuple[str, ...] | None = ("ga",) if TIMING_LITE_MODE else None
+
 # Default configs used by the notebook sections.
-DEFAULT_CORE_CONFIG = CoreSectionConfig()
+DEFAULT_CORE_CONFIG = CoreSectionConfig(
+    reuse_unlearned_checkpoints=False if TIMING_LITE_MODE else True,
+)
 DEFAULT_TRAJECTORY_CONFIG = TrajectorySectionConfig()
 DEFAULT_MULTITARGET_CONFIG = MultitargetSectionConfig()
 DEFAULT_REFRESH_SIMILARITY_CORRELATION_CONFIG = RefreshSimilarityCorrelationConfig()
